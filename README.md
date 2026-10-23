@@ -70,6 +70,19 @@ OpenCode reloads changes under watched configuration directories automatically. 
 
 This project does not edit your OpenCode configuration. To uninstall, run `opencode plugin remove` for the pinned target, or remove its entry, then reload. Remove only the quota entry and preserve unrelated plugins.
 
+### Fallback when the native Git installer fails
+
+If `opencode plugin add` reports `git dep preparation failed` while authenticated Git access works, install the same pinned GitHub revision into a dedicated runtime directory:
+
+```sh
+revision=30cdd639988fb2cf4d3bae3beb4590c86dbddb36
+prefix="$HOME/.local/share/opencode/installed-plugins/opencode-opencodex-quota/$revision"
+npm install --ignore-scripts --omit=dev --save-exact --prefix "$prefix" \
+  "git+https://github.com/giannisCKS/opencode-opencodex-quota.git#$revision"
+```
+
+Configure `$prefix/node_modules/opencode-opencodex-quota` as an absolute directory in the global `plugins` array, replacing only the old quota entry. Keep the generated installation manifest and lockfile. This package comes from GitHub, not the development checkout. Updates are manual: install another reviewed revision into a new directory and change only that plugin path. Native `plugin update` does not manage directory installations.
+
 ## Development
 
 ```sh
