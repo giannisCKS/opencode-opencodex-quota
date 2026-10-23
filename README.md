@@ -9,7 +9,9 @@ A local OpenCode V2 plugin for the OpenCodex passive quota pool. It provides a q
 - Cached quota only. Reading this endpoint does not probe providers or refresh upstream quota.
 - The sidebar reads every 60 seconds. `/quota` opens a scrollable dialog and requests another passive reading.
 - Provider pools and accounts come from OpenCodex. This plugin does not authenticate with individual providers.
-- Missing quota remains unknown, never zero. Account states and model-specific windows remain distinct.
+- Missing quota remains unknown, never zero. Unknown values have no bar.
+- Known percentages show a compact bar and a numeric remaining label. Reset and model scope stay visible, and exhausted windows stay marked.
+- The OpenAI provider shows pooled windows only; other providers keep account states and account windows.
 - No accounting, pricing, reset notifications, reference-plugin formatting, configuration module, or extra dependencies.
 
 This replaces the previous adaptation of `@slkiser/opencode-quota`. Its report format and `/quota_status` command are no longer included.

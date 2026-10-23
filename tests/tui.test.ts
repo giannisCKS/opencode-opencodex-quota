@@ -10,6 +10,7 @@ import plugin, {
   quotaDialogSubtitle,
   quotaSidebarRows,
   quotaSidebarStatus,
+  remainingBar,
   remainingLabel,
   TUI_SIDEBAR_MAX_WIDTH,
   type QuotaReading,
@@ -147,7 +148,13 @@ test("exhausted windows keep the percent and one explicit marker", () => {
   const exhausted = snapshot(window({ usedPercent: 0, exhausted: true }));
   const sidebar = joined(quotaSidebarRows(reading({ snapshot: exhausted })));
   assert.ok(sidebar.includes("Weekly: 100% left, exhausted"));
+  assert.ok(sidebar.includes("█".repeat(10)));
   assert.equal((sidebar.match(/exhausted/gu) ?? []).length, 1);
+
+  const zero = snapshot(window({ usedPercent: 100, exhausted: true }));
+  const zeroSidebar = joined(quotaSidebarRows(reading({ snapshot: zero })));
+  assert.ok(zeroSidebar.includes("Weekly: 0% left, exhausted"));
+  assert.ok(zeroSidebar.includes("░".repeat(10)));
 
   const dialog = joined(quotaDialogRows(reading({ snapshot: exhausted })));
   assert.ok(dialog.includes("Weekly: 100% left, exhausted"));
@@ -158,6 +165,89 @@ test("exhausted windows keep the percent and one explicit marker", () => {
   const unknownSidebar = joined(quotaSidebarRows(reading({ snapshot: unknown })));
   assert.ok(unknownSidebar.includes("Weekly: exhausted"));
   assert.equal((unknownSidebar.match(/exhausted/gu) ?? []).length, 1);
+});
+
+test("bars show known remaining percentages and never draw unknown values", () => {
+  const full = "█".repeat(10);
+  const empty = "░".repeat(10);
+
+  assert.equal(remainingBar(window({ usedPercent: 0 })), full);
+  assert.equal(remainingBar(window({ usedPercent: 100 })), empty);
+  assert.equal(remainingBar(window({ usedPercent: 8.5 })), `${"█".repeat(9)}░`);
+  assert.equal(remainingBar(window({ usedPercent: 38 })), `${"█".repeat(6)}${"░".repeat(4)}`);
+  assert.equal(remainingBar(window({ usedPercent: 100, exhausted: true })), empty);
+  assert.equal(remainingBar(window({})), undefined);
+  assert.equal(remainingBar(window({ exhausted: true })), undefined);
+
+  const unknownSnapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "limit-provider",
+        pooled: { windows: [window({})] },
+        accounts: [],
+      },
+    ],
+  };
+  const unknownSidebar = joined(quotaSidebarRows(reading({ snapshot: unknownSnapshot })));
+  assert.ok(unknownSidebar.includes("Weekly: remaining unknown"));
+  assert.ok(!/[█░]/u.test(unknownSidebar), "an unknown value must not have a bar");
+
+  const unknownDialog = joined(quotaDialogRows(reading({ snapshot: unknownSnapshot })));
+  assert.ok(unknownDialog.includes("Weekly: remaining unknown"));
+  assert.ok(!/[█░]/u.test(unknownDialog), "an unknown value must not have a dialog bar");
+});
+
+test("OpenAI shows pooled bars only while other providers keep accounts", () => {
+  const visibility: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: {
+          windows: [
+            window({ label: "5-hour", usedPercent: 14 }),
+            window({ label: "Weekly", usedPercent: 8.5 }),
+          ],
+        },
+        accounts: [
+          {
+            label: "main/p56d532",
+            state: "available",
+            windows: [window({ label: "OpenAI account weekly", usedPercent: 20 })],
+          },
+        ],
+      },
+      {
+        provider: "opencode-go",
+        pooled: { windows: [window({ label: "5-hour", usedPercent: 25 })] },
+        accounts: [
+          {
+            label: "work",
+            state: "available",
+            windows: [window({ label: "Go account weekly", usedPercent: 60 })],
+          },
+        ],
+      },
+    ],
+  };
+  const value = reading({ snapshot: visibility });
+
+  const sidebar = joined(quotaSidebarRows(value));
+  assert.ok(sidebar.includes("5-hour: 86% left"));
+  assert.ok(sidebar.includes("Weekly: 91.5% left"));
+  assert.ok(!sidebar.includes("main/p56d532"), "OpenAI account names stay hidden");
+  assert.ok(!sidebar.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
+  assert.ok(sidebar.includes("work: available"), "other providers keep account states");
+  assert.ok(sidebar.includes("Go account weekly: 40% left"), "other providers keep account windows");
+
+  const dialog = joined(quotaDialogRows(value));
+  assert.ok(dialog.includes("5-hour: 86% left"));
+  assert.ok(dialog.includes("Weekly: 91.5% left"));
+  assert.ok(!dialog.includes("main/p56d532"), "OpenAI account names stay hidden in the dialog");
+  assert.ok(!dialog.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
+  assert.ok(dialog.includes("work: available"));
+  assert.ok(dialog.includes("Go account weekly: 40% left"));
 });
 
 test("age labels are compact and bounded", () => {
@@ -255,13 +345,13 @@ test("dialog shows pooled and account quota, reset, observation, and source", ()
   assert.ok(text.includes("second-provider"));
   assert.ok(text.includes("Pooled"));
   assert.ok(text.includes("Accounts"));
-  assert.ok(text.includes("  Weekly: 62% left"));
+  assert.ok(all.includes("Weekly: 62% left"));
   assert.ok(
     text.includes("    used 38% | reset in 2h | observed 2m ago | source: measured"),
     all,
   );
   assert.ok(text.includes("  Daily (gpt-5.2): remaining unknown"));
-  assert.ok(text.includes("  Credits: 0% left, exhausted"));
+  assert.ok(all.includes("Credits: 0% left, exhausted"));
   assert.ok(all.includes("used 100% | observed 1m ago | source: estimated"));
   assert.ok(text.includes("  next reset in 2h"));
   assert.ok(text.includes("  Team (Pro): exhausted"));

@@ -126,9 +126,16 @@ export declare function formatDuration(value: number): string;
 export declare function ageLabel(value: string | undefined, now: number): string | undefined;
 /** Remaining quota, or an explicit unknown. A missing percent is never shown as zero. */
 export declare function remainingLabel(window: QuotaWindow): string;
+/** The bar width used in the sidebar and the dialog. */
+export declare const QUOTA_BAR_WIDTH = 10;
+/**
+ * A compact remaining-quota bar. A missing percent returns undefined, so an
+ * unknown value is never drawn as an empty or zero bar.
+ */
+export declare function remainingBar(window: QuotaWindow, width?: number): string | undefined;
 /** The sidebar's one-line status. A null status means the rows carry the state. */
 export declare function quotaSidebarStatus(input: QuotaReading): string | undefined;
-/** The compact sidebar rows. Providers, pooled windows, and accounts are all kept. */
+/** Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep accounts. */
 export declare function quotaSidebarRows(input: QuotaReading): QuotaRow[];
 /** The full, scrollable dialog rows. No model request is made to build them. */
 export declare function quotaDialogRows(input: QuotaReading): QuotaRow[];

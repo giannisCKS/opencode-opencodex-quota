@@ -205,6 +205,29 @@ export function remainingLabel(window: QuotaWindow): string {
   return window.exhausted === true ? "exhausted" : "remaining unknown";
 }
 
+const BAR_FILLED = "█";
+const BAR_EMPTY = "░";
+
+/** The bar width used in the sidebar and the dialog. */
+export const QUOTA_BAR_WIDTH = 10;
+
+/**
+ * A compact remaining-quota bar. A missing percent returns undefined, so an
+ * unknown value is never drawn as an empty or zero bar.
+ */
+export function remainingBar(
+  window: QuotaWindow,
+  width = QUOTA_BAR_WIDTH,
+): string | undefined {
+  if (window.usedPercent === undefined) return undefined;
+  const cells = Math.max(1, Math.floor(width));
+  const remaining = Math.min(100, Math.max(0, 100 - window.usedPercent));
+  let filled = Math.round((remaining / 100) * cells);
+  if (remaining > 0 && filled === 0) filled = 1;
+  if (remaining < 100 && filled === cells && cells > 1) filled = cells - 1;
+  return `${BAR_FILLED.repeat(filled)}${BAR_EMPTY.repeat(cells - filled)}`;
+}
+
 function windowHead(window: QuotaWindow): string {
   const label = sanitize(window.label);
   const scope = window.scopeModel ? sanitize(window.scopeModel) : undefined;
@@ -227,6 +250,13 @@ const ACCOUNT_STATE_LABELS: Record<QuotaAccountState, string> = {
 
 function accountTone(state: QuotaAccountState): QuotaTone {
   return state === "exhausted" || state === "reauth" ? "warning" : "text";
+}
+
+/** Providers that expose pooled quota only; their account rows stay hidden. */
+const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
+
+function showsProviderAccounts(provider: QuotaProvider): boolean {
+  return !POOLED_ONLY_PROVIDERS.has(provider.provider.trim().toLowerCase());
 }
 
 function sourceLabel(source: QuotaWindow["source"]): string {
@@ -262,6 +292,17 @@ function sidebarWindowLine(window: QuotaWindow, now: number): string {
   const reset = resetText(window.resetsAt, now);
   if (reset) parts.push(`reset ${reset}`);
   return `${windowHead(window)}: ${parts.join(", ")}`;
+}
+
+function pushSidebarWindow(
+  rows: QuotaRow[],
+  window: QuotaWindow,
+  now: number,
+  indent: number,
+): void {
+  pushWrapped(rows, sidebarWindowLine(window, now), "text", indent);
+  const bar = remainingBar(window);
+  if (bar) pushWrapped(rows, bar, "text", indent);
 }
 
 function resolveReading(input: QuotaReading) {
@@ -308,7 +349,7 @@ export function quotaSidebarStatus(input: QuotaReading): string | undefined {
   return ageText(reading.age);
 }
 
-/** The compact sidebar rows. Providers, pooled windows, and accounts are all kept. */
+/** Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep accounts. */
 export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
   const reading = resolveReading(input);
   const rows: QuotaRow[] = [];
@@ -331,9 +372,9 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
       pushWrapped(rows, "No pooled windows.", "muted", 4);
     }
     for (const window of provider.pooled.windows) {
-      pushWrapped(rows, sidebarWindowLine(window, reading.now), "text", 4);
+      pushSidebarWindow(rows, window, reading.now, 4);
     }
-    if (provider.accounts.length > 0) {
+    if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
       pushWrapped(rows, "Accounts", "muted", 2);
       for (const account of provider.accounts) {
         pushWrapped(
@@ -346,7 +387,7 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
           pushWrapped(rows, "Quota unknown.", "muted", 6);
         }
         for (const window of account.windows) {
-          pushWrapped(rows, sidebarWindowLine(window, reading.now), "text", 6);
+          pushSidebarWindow(rows, window, reading.now, 6);
         }
       }
     }
@@ -355,7 +396,9 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
 }
 
 function pushWindowDetail(rows: QuotaRow[], window: QuotaWindow, now: number, indent: number): void {
-  rows.push({ text: `${" ".repeat(indent)}${windowHead(window)}: ${remainingLabel(window)}`, tone: "text" });
+  const bar = remainingBar(window);
+  const headline = `${windowHead(window)}: ${remainingLabel(window)}${bar ? `  ${bar}` : ""}`;
+  rows.push({ text: `${" ".repeat(indent)}${headline}`, tone: "text" });
   rows.push({ text: `${" ".repeat(indent + 2)}${windowDetail(window, now)}`, tone: "muted" });
 }
 
@@ -376,7 +419,7 @@ function pushProvider(rows: QuotaRow[], provider: QuotaProvider, now: number): v
     rows.push({ text: `  ${poolMeta.join(" | ")}`, tone: "muted" });
   }
 
-  if (provider.accounts.length > 0) {
+  if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
     rows.push({ text: "Accounts", tone: "muted" });
     for (const account of provider.accounts) {
       rows.push({
