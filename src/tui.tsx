@@ -287,22 +287,37 @@ function windowDetail(window: QuotaWindow, now: number): string {
   return parts.join(" | ");
 }
 
-function sidebarWindowLine(window: QuotaWindow, now: number): string {
-  const parts = [remainingLabel(window)];
-  const reset = resetText(window.resetsAt, now);
-  if (reset) parts.push(`reset ${reset}`);
-  return `${windowHead(window)}: ${parts.join(", ")}`;
+function compactRemainingLabel(window: QuotaWindow): string {
+  if (window.usedPercent !== undefined) {
+    const percent = `${formatPercent(100 - window.usedPercent)}%`;
+    return window.exhausted === true ? `${percent} exhausted` : percent;
+  }
+  return window.exhausted === true ? "exhausted" : "unknown";
 }
 
-function pushSidebarWindow(
+function compactWindowLine(window: QuotaWindow): string {
+  const bar = remainingBar(window);
+  const remaining = compactRemainingLabel(window);
+  return bar
+    ? `${windowHead(window)} ${bar} ${remaining}`
+    : `${windowHead(window)} ${remaining}`;
+}
+
+function pushCompactWindow(
   rows: QuotaRow[],
   window: QuotaWindow,
   now: number,
   indent: number,
 ): void {
-  pushWrapped(rows, sidebarWindowLine(window, now), "text", indent);
-  const bar = remainingBar(window);
-  if (bar) pushWrapped(rows, bar, "text", indent);
+  const base = compactWindowLine(window);
+  const reset = resetText(window.resetsAt, now);
+  const suffix = reset ? `, reset ${reset}` : "";
+  if (!reset || base.length + suffix.length + indent <= TUI_SIDEBAR_MAX_WIDTH) {
+    pushWrapped(rows, `${base}${suffix}`, "text", indent);
+    return;
+  }
+  pushWrapped(rows, base, "text", indent);
+  pushWrapped(rows, `reset ${reset}`, "muted", indent);
 }
 
 function resolveReading(input: QuotaReading) {
@@ -364,30 +379,28 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
     return rows;
   }
 
-  reading.providers.forEach((provider, index) => {
-    if (index > 0) rows.push({ text: "", tone: "text" });
+  reading.providers.forEach((provider) => {
     pushWrapped(rows, provider.provider, "title");
-    pushWrapped(rows, "Pooled", "muted", 2);
     if (provider.pooled.windows.length === 0) {
-      pushWrapped(rows, "No pooled windows.", "muted", 4);
+      pushWrapped(rows, "No pooled windows.", "muted");
     }
     for (const window of provider.pooled.windows) {
-      pushSidebarWindow(rows, window, reading.now, 4);
+      pushCompactWindow(rows, window, reading.now, 0);
     }
     if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
-      pushWrapped(rows, "Accounts", "muted", 2);
+      pushWrapped(rows, "Accounts", "muted");
       for (const account of provider.accounts) {
         pushWrapped(
           rows,
           `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`,
           accountTone(account.state),
-          4,
+          2,
         );
         if (account.windows.length === 0) {
-          pushWrapped(rows, "Quota unknown.", "muted", 6);
+          pushWrapped(rows, "Quota unknown.", "muted", 2);
         }
         for (const window of account.windows) {
-          pushSidebarWindow(rows, window, reading.now, 6);
+          pushCompactWindow(rows, window, reading.now, 2);
         }
       }
     }
@@ -404,7 +417,6 @@ function pushWindowDetail(rows: QuotaRow[], window: QuotaWindow, now: number, in
 
 function pushProvider(rows: QuotaRow[], provider: QuotaProvider, now: number): void {
   rows.push({ text: sanitize(provider.provider), tone: "title" });
-  rows.push({ text: "Pooled", tone: "muted" });
   if (provider.pooled.windows.length === 0) {
     rows.push({ text: "  No pooled windows.", tone: "muted" });
   }
