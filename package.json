@@ -31,7 +31,7 @@
     "clean": "node scripts/clean-dist.mjs",
     "build": "npm run clean && tsc && node scripts/prepare-tui-dist.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --conditions=browser --import tsx --test --test-concurrency=1 tests/*.test.ts",
     "validate": "npm run typecheck && npm run build && npm test"
   },
   "keywords": [

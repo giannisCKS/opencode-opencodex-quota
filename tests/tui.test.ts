@@ -844,6 +844,162 @@ test("store polls on its interval and stops after disposal", async (t) => {
   assert.equal(calls, 2);
 });
 
+/** Flushes promise callbacks when setTimeout itself is mocked. */
+const flush = async () => {
+  for (let index = 0; index < 5; index += 1) await Promise.resolve();
+};
+
+test("store settles a request that ignores its abort at the deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+
+  let calls = 0;
+  const store = createQuotaStore(
+    () => {
+      calls += 1;
+      return new Promise<QuotaSnapshot>(() => {});
+    },
+    { pollIntervalMs: 60_000, requestTimeoutMs: 10_000 },
+  );
+  t.after(() => store.dispose());
+
+  assert.equal(store.loading(), true);
+  store.refresh();
+  assert.equal(calls, 1, "a refresh during a load is queued");
+
+  t.mock.timers.tick(10_000);
+  await flush();
+
+  assert.equal(store.loading(), false, "the deadline must clear loading");
+  assert.match(store.failure() ?? "", /Quota request timed out/u);
+  assert.equal(store.snapshot(), undefined);
+  assert.equal(calls, 1, "the deadline must not immediately retry a queued poll");
+
+  t.mock.timers.tick(50_000);
+  await flush();
+  assert.equal(calls, 2, "the next interval poll still runs");
+});
+
+test("store keeps the last good reading when a refresh times out", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  const { pending, load } = deferredLoader();
+  let clock = NOW;
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    requestTimeoutMs: 10_000,
+    now: () => clock,
+  });
+  t.after(() => store.dispose());
+
+  pending[0].resolve(SNAPSHOT);
+  await flush();
+  assert.equal(store.loading(), false);
+
+  clock += MINUTE;
+  store.refresh();
+  t.mock.timers.tick(10_000);
+  await flush();
+
+  assert.equal(store.snapshot(), SNAPSHOT, "a timeout must keep the last good reading");
+  assert.equal(store.lastLoadedAt(), NOW, "a timeout must not refresh the reading age");
+  assert.match(store.failure() ?? "", /Quota request timed out/u);
+  assert.equal(store.loading(), false);
+
+  clock = NOW + QUOTA_STALE_AFTER_MS;
+  const subtitle = quotaDialogSubtitle({
+    snapshot: store.snapshot(),
+    failure: store.failure(),
+    loading: store.loading(),
+    lastLoadedAt: store.lastLoadedAt(),
+    now: clock,
+  });
+  assert.match(subtitle, /stale /u);
+});
+
+test("store ignores late results and failures from an expired request", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  const { pending, load } = deferredLoader();
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    requestTimeoutMs: 10_000,
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.match(store.failure() ?? "", /Quota request timed out/u);
+
+  pending[0].resolve(SNAPSHOT);
+  await flush();
+  assert.equal(store.snapshot(), undefined, "a late resolve must not apply");
+  assert.equal(store.lastLoadedAt(), undefined);
+  assert.equal(store.loading(), false);
+
+  store.refresh();
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(pending.length, 2);
+
+  pending[1].reject(new Error("late failure"));
+  await flush();
+  assert.match(store.failure() ?? "", /Quota request timed out/u);
+  assert.equal(store.loading(), false);
+});
+
+test("store recovers on a later poll after a timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  const { pending, load } = deferredLoader();
+  let clock = NOW;
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    requestTimeoutMs: 10_000,
+    now: () => clock,
+  });
+  t.after(() => store.dispose());
+
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.match(store.failure() ?? "", /Quota request timed out/u);
+
+  clock += 60_000;
+  t.mock.timers.tick(50_000);
+  await flush();
+  assert.equal(pending.length, 2, "the interval poll runs after the timeout");
+  assert.equal(store.loading(), true);
+
+  pending[1].resolve(SNAPSHOT);
+  await flush();
+  assert.equal(store.snapshot(), SNAPSHOT);
+  assert.equal(store.failure(), undefined);
+  assert.equal(store.lastLoadedAt(), clock);
+  assert.equal(store.loading(), false);
+});
+
+test("store disposal clears the deadline timer and ignores a late result", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  const { pending, load } = deferredLoader();
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    requestTimeoutMs: 10_000,
+    now: () => NOW,
+  });
+
+  store.dispose();
+  t.mock.timers.tick(70_000);
+  await flush();
+  assert.equal(pending.length, 1, "disposal must stop polling");
+
+  pending[0].resolve(SNAPSHOT);
+  await flush();
+  assert.equal(store.snapshot(), undefined);
+  assert.equal(store.failure(), undefined);
+});
+
 type Claim = { append: string; render: (...args: never[]) => unknown };
 type Layer = {
   mode?: string;

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// The renderer runs the client Solid runtime entry. Importing it here makes the
-// regression fail when the store is created on a different runtime.
-import { createEffect, createRoot } from "solid-js/dist/solid.js";
+// Browser conditions select a client runtime for signal propagation tests.
+// The package test separately guards the host-rewritten bare import specifier.
+import { createEffect, createRoot } from "solid-js";
 
 import type { QuotaSnapshot } from "../src/quota.ts";
 import { createQuotaStore } from "../src/tui.tsx";

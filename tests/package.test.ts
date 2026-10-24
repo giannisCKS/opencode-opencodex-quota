@@ -68,6 +68,19 @@ test("the tui subpath export loads the built TUI plugin", async () => {
   assert.equal(typeof plugin.setup, "function");
 });
 
+test("the built TUI imports Solid from the host-rewritten specifier", () => {
+  // OpenCode's TUI runtime rewrites bare "solid-js"; a dist/ subpath is not
+  // rewritten and loads a second runtime whose component updates create
+  // elements without a renderer owner ("No renderer found").
+  const built = readFileSync(join(ROOT, "dist/tui.js"), "utf8");
+  assert.match(built, /from\s+"solid-js";/u, "dist/tui.js must import bare solid-js");
+  assert.doesNotMatch(
+    built,
+    /solid-js\/dist\/solid\.js/u,
+    "dist/tui.js must not import the unrewritten Solid subpath",
+  );
+});
+
 test("every declared entry point resolves to a file on disk", () => {
   const manifest = readJson(join(ROOT, "package.json"));
   assert.equal(manifest.main, "./dist/index.js");

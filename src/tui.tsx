@@ -3,9 +3,10 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { ScrollBoxRenderable, TextAttributes, type RGBA } from "@opentui/core";
 import { type JSX, useTerminalDimensions } from "@opentui/solid";
-// The renderer loads the client Solid runtime; bare "solid-js" resolves to the
-// server runtime under Node, whose signals never notify renderer effects.
-import { createSignal, Show } from "solid-js/dist/solid.js";
+// OpenCode rewrites the bare "solid-js" specifier to the client runtime its
+// renderer uses. A dist/solid.js subpath is not rewritten, which loads a second
+// runtime whose components create elements without a renderer owner.
+import { createSignal, Show } from "solid-js";
 
 import type {
   QuotaAccount,
@@ -664,10 +665,32 @@ export function createQuotaStore(load: QuotaLoader, options: QuotaStoreOptions =
     setLoading(true);
     const controller = new AbortController();
     active = controller;
-    const timeout = setTimeout(
-      () => controller.abort(new DOMException("Quota request timed out", "TimeoutError")),
-      requestTimeoutMs,
-    );
+    // One completion per request: the deadline below settles the store even when
+    // the loader ignores its abort signal, and a late result must not apply.
+    let settled = false;
+    const complete = (apply: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (activeTimeout === timeout) activeTimeout = undefined;
+      if (disposed) return;
+      active = undefined;
+      inFlight = false;
+      apply();
+      setLoading(false);
+      if (queued) {
+        queued = false;
+        refresh();
+      }
+    };
+    const timeoutError = new DOMException("Quota request timed out", "TimeoutError");
+    const timeout = setTimeout(() => {
+      controller.abort(timeoutError);
+      // No immediate retry: a queued poll waits for the next interval, so a
+      // permanently hanging loader cannot spin.
+      queued = false;
+      complete(() => setFailure(rpcErrorMessage(timeoutError)));
+    }, requestTimeoutMs);
     activeTimeout = timeout;
 
     let request: Promise<QuotaSnapshot>;
@@ -679,34 +702,22 @@ export function createQuotaStore(load: QuotaLoader, options: QuotaStoreOptions =
 
     void request
       .then((value) => {
-        if (disposed) return;
-        const backendError =
-          typeof value.error === "string" && value.error.length > 0 ? value.error : undefined;
-        if (backendError) {
-          // A backend-reported error is not a good reading. Keep the last good
-          // snapshot, and expose the reason like a transport failure.
-          setFailure(backendError);
-          return;
-        }
-        setSnapshot(value);
-        setFailure(undefined);
-        setLastLoadedAt(now());
+        complete(() => {
+          const backendError =
+            typeof value.error === "string" && value.error.length > 0 ? value.error : undefined;
+          if (backendError) {
+            // A backend-reported error is not a good reading. Keep the last good
+            // snapshot, and expose the reason like a transport failure.
+            setFailure(backendError);
+            return;
+          }
+          setSnapshot(value);
+          setFailure(undefined);
+          setLastLoadedAt(now());
+        });
       })
       .catch((error: unknown) => {
-        if (disposed) return;
-        setFailure(rpcErrorMessage(error));
-      })
-      .finally(() => {
-        clearTimeout(timeout);
-        if (activeTimeout === timeout) activeTimeout = undefined;
-        if (disposed) return;
-        active = undefined;
-        inFlight = false;
-        setLoading(false);
-        if (queued) {
-          queued = false;
-          refresh();
-        }
+        complete(() => setFailure(rpcErrorMessage(error)));
       });
   };
 
