@@ -11,7 +11,7 @@ A local OpenCode V2 plugin for the OpenCodex passive quota pool. It provides a q
 - Provider pools and accounts come from OpenCodex. This plugin does not authenticate with individual providers.
 - Missing quota remains unknown, never zero. Unknown values have no bar.
 - Known percentages show a compact thin bar and a numeric remaining label. Reset countdowns and model scope stay visible, and exhausted windows stay marked.
-- Sidebar resets count down in minutes under one hour, hours under one day, and compact days otherwise. OpenAI pooled rows prefer the pooled reset; if absent, they show `next <time>` from the earliest future matching available or exhausted account window, or `?d` when unknown. Paused, sign-in-required, and unknown accounts are skipped. This is a next contributing account reset, not a guaranteed pool reset.
+- Sidebar resets count down in minutes under one hour, hours under one day, and whole days otherwise. OpenAI pooled rows prefer the pooled reset; if absent, they show `next <time>` from the earliest future matching available or exhausted account window, or `?d` when unknown. Paused, sign-in-required, and unknown accounts are skipped. This is a next contributing account reset, not a guaranteed pool reset.
 - The OpenAI provider shows pooled windows only; other providers keep account states and account windows.
 - No accounting, pricing, reset notifications, reference-plugin formatting, configuration module, or extra dependencies.
 

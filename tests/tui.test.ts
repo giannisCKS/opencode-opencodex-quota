@@ -167,7 +167,7 @@ test("exhausted windows keep the percent and one explicit marker", () => {
   assert.equal((unknownSidebar.match(/exhausted/gu) ?? []).length, 1);
 });
 
-test("reset countdowns use minutes, hours, then compact days", () => {
+test("reset countdowns use minutes, hours, then whole days", () => {
   assert.equal(formatCountdown(1), "1m");
   assert.equal(formatCountdown(60_000), "1m");
   assert.equal(formatCountdown(30 * MINUTE), "30m");
@@ -176,7 +176,8 @@ test("reset countdowns use minutes, hours, then compact days", () => {
   assert.equal(formatCountdown(23 * HOUR), "23h");
   assert.equal(formatCountdown(24 * HOUR), "1d");
   assert.equal(formatCountdown(2 * 24 * HOUR), "2d");
-  assert.equal(formatCountdown(2.4 * 24 * HOUR), "2.4d");
+  assert.equal(formatCountdown(2.4 * 24 * HOUR), "2d");
+  assert.equal(formatCountdown(6.7 * 24 * HOUR), "7d");
   assert.equal(formatCountdown(29 * 24 * HOUR), "29d");
   assert.equal(formatCountdown(0), "due");
   assert.equal(formatCountdown(-HOUR), "due");
@@ -302,6 +303,17 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
     ),
     "the dialog explains the account-reset fallback",
   );
+
+  const weekFallback = read(
+    resetSnapshot("openai", [window({ usedPercent: 38 })], [
+      {
+        label: "main",
+        state: "available",
+        windows: [window({ usedPercent: 20, resetsAt: at(6.7 * 24 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(weekFallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 7d"));
 
   const priority = read(
     resetSnapshot("openai", [window({ usedPercent: 38, resetsAt: at(48 * HOUR) })], [

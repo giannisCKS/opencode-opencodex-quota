@@ -184,7 +184,7 @@ const DAY_MS = 86_400_000;
 
 /**
  * Compact reset countdown. Minutes under one hour (rounded up, at least 1m),
- * hours under one day, then days. A due or past reset reads due.
+ * hours under one day, then whole days. A due or past reset reads due.
  */
 export function formatCountdown(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "due";
@@ -194,12 +194,7 @@ export function formatCountdown(value: number): string {
   if (value < DAY_MS) {
     return `${Math.max(1, Math.round(value / 3_600_000))}h`;
   }
-  const days = value / DAY_MS;
-  if (days < 10) {
-    const rounded = Math.round(days * 10) / 10;
-    return Number.isInteger(rounded) ? `${rounded}d` : `${rounded.toFixed(1)}d`;
-  }
-  return `${Math.round(days)}d`;
+  return `${Math.round(value / DAY_MS)}d`;
 }
 
 /** Countdown for a timestamp, or ?d when no timestamp exists. */

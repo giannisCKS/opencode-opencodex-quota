@@ -126,7 +126,7 @@ export declare function formatDuration(value: number): string;
 export declare function ageLabel(value: string | undefined, now: number): string | undefined;
 /**
  * Compact reset countdown. Minutes under one hour (rounded up, at least 1m),
- * hours under one day, then days. A due or past reset reads due.
+ * hours under one day, then whole days. A due or past reset reads due.
  */
 export declare function formatCountdown(value: number): string;
 /** Countdown for a timestamp, or ?d when no timestamp exists. */
