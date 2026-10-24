@@ -98,16 +98,18 @@ function resetText(value, now) {
 const DAY_MS = 86_400_000;
 
 /**
- * Compact days remaining. Future values under one day use one decimal and
- * never round down to 0d. A past or immediate reset is 0d.
+ * Compact reset countdown. Minutes under one hour (rounded up, at least 1m),
+ * hours under one day, then days. A due or past reset reads due.
  */
-export function formatDayCount(value) {
-  if (!Number.isFinite(value) || value <= 0) return "0d";
-  const days = value / DAY_MS;
-  if (days < 1) {
-    const tenths = Math.max(1, Math.round(days * 10));
-    return tenths >= 10 ? "1d" : `${(tenths / 10).toFixed(1)}d`;
+export function formatCountdown(value) {
+  if (!Number.isFinite(value) || value <= 0) return "due";
+  if (value < 3_600_000) {
+    return `${Math.max(1, Math.ceil(value / 60_000))}m`;
   }
+  if (value < DAY_MS) {
+    return `${Math.max(1, Math.round(value / 3_600_000))}h`;
+  }
+  const days = value / DAY_MS;
   if (days < 10) {
     const rounded = Math.round(days * 10) / 10;
     return Number.isInteger(rounded) ? `${rounded}d` : `${rounded.toFixed(1)}d`;
@@ -115,10 +117,10 @@ export function formatDayCount(value) {
   return `${Math.round(days)}d`;
 }
 
-/** Days remaining for a timestamp, or ?d when no timestamp exists. */
-export function formatResetDays(value, now) {
+/** Countdown for a timestamp, or ?d when no timestamp exists. */
+export function formatResetCountdown(value, now) {
   const time = parseInstant(value);
-  return time === undefined ? "?d" : formatDayCount(time - now);
+  return time === undefined ? "?d" : formatCountdown(time - now);
 }
 function formatPercent(value) {
   const clamped = Math.min(100, Math.max(0, value));
@@ -223,10 +225,10 @@ function accountResetFallback(provider, window, now) {
 }
 function sidebarReset(provider, window, now) {
   if (parseInstant(window.resetsAt) !== undefined) {
-    return formatResetDays(window.resetsAt, now);
+    return formatResetCountdown(window.resetsAt, now);
   }
   const fallback = accountResetFallback(provider, window, now);
-  if (fallback) return `next ${formatResetDays(fallback, now)}`;
+  if (fallback) return `next ${formatResetCountdown(fallback, now)}`;
   return "?d";
 }
 function sourceLabel(source) {
@@ -368,7 +370,7 @@ function pushWindowDetail(rows, provider, window, now, indent) {
   const bar = remainingBar(window);
   const headline = `${windowHead(window)}: ${remainingLabel(window)}${bar ? `  ${bar}` : ""}`;
   const fallback = window.resetsAt === undefined ? accountResetFallback(provider, window, now) : undefined;
-  const resetNote = fallback ? `next account reset ${formatResetDays(fallback, now)}` : undefined;
+  const resetNote = fallback ? `next account reset ${formatResetCountdown(fallback, now)}` : undefined;
   rows.push({
     text: `${" ".repeat(indent)}${headline}`,
     tone: "text"
