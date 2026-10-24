@@ -124,6 +124,13 @@ export type QuotaReading = {
 export declare function formatDuration(value: number): string;
 /** A human age for an ISO timestamp: just now, 7m ago, 3h ago. */
 export declare function ageLabel(value: string | undefined, now: number): string | undefined;
+/**
+ * Compact days remaining. Future values under one day use one decimal and
+ * never round down to 0d. A past or immediate reset is 0d.
+ */
+export declare function formatDayCount(value: number): string;
+/** Days remaining for a timestamp, or ?d when no timestamp exists. */
+export declare function formatResetDays(value: string | undefined, now: number): string;
 /** Remaining quota, or an explicit unknown. A missing percent is never shown as zero. */
 export declare function remainingLabel(window: QuotaWindow): string;
 /** The bar width used in the sidebar and the dialog. */

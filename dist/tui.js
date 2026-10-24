@@ -95,6 +95,31 @@ function resetText(value, now) {
   if (remaining <= 5_000) return "due";
   return `in ${formatDuration(remaining)}`;
 }
+const DAY_MS = 86_400_000;
+
+/**
+ * Compact days remaining. Future values under one day use one decimal and
+ * never round down to 0d. A past or immediate reset is 0d.
+ */
+export function formatDayCount(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0d";
+  const days = value / DAY_MS;
+  if (days < 1) {
+    const tenths = Math.max(1, Math.round(days * 10));
+    return tenths >= 10 ? "1d" : `${(tenths / 10).toFixed(1)}d`;
+  }
+  if (days < 10) {
+    const rounded = Math.round(days * 10) / 10;
+    return Number.isInteger(rounded) ? `${rounded}d` : `${rounded.toFixed(1)}d`;
+  }
+  return `${Math.round(days)}d`;
+}
+
+/** Days remaining for a timestamp, or ?d when no timestamp exists. */
+export function formatResetDays(value, now) {
+  const time = parseInstant(value);
+  return time === undefined ? "?d" : formatDayCount(time - now);
+}
 function formatPercent(value) {
   const clamped = Math.min(100, Math.max(0, value));
   const rounded = Math.round(clamped * 10) / 10;
@@ -119,8 +144,8 @@ export function remainingLabel(window) {
   }
   return window.exhausted === true ? "exhausted" : "remaining unknown";
 }
-const BAR_FILLED = "█";
-const BAR_EMPTY = "░";
+const BAR_FILLED = "▰";
+const BAR_EMPTY = "▱";
 
 /** The bar width used in the sidebar and the dialog. */
 export const QUOTA_BAR_WIDTH = 10;
@@ -161,14 +186,54 @@ function accountTone(state) {
 
 /** Providers that expose pooled quota only; their account rows stay hidden. */
 const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
+function isPooledOnlyProvider(provider) {
+  return POOLED_ONLY_PROVIDERS.has(provider.provider.trim().toLowerCase());
+}
 function showsProviderAccounts(provider) {
-  return !POOLED_ONLY_PROVIDERS.has(provider.provider.trim().toLowerCase());
+  return !isPooledOnlyProvider(provider);
+}
+
+/**
+ * The earliest future reset on an available or exhausted account window for the
+ * same kind, scope, and custom label. Paused, reauth, and unknown accounts are
+ * skipped, because their cached dates do not make them next contributors. This
+ * is a next contributing account reset, not the pool reset.
+ */
+function accountResetFallback(provider, window, now) {
+  if (!isPooledOnlyProvider(provider)) return undefined;
+  const scope = window.scopeModel;
+  const custom = window.kind === "custom";
+  let earliest;
+  let at;
+  for (const account of provider.accounts) {
+    if (account.state !== "available" && account.state !== "exhausted") continue;
+    for (const candidate of account.windows) {
+      if (candidate.kind !== window.kind) continue;
+      if ((candidate.scopeModel ?? undefined) !== (scope ?? undefined)) continue;
+      if (custom && sanitize(candidate.label) !== sanitize(window.label)) continue;
+      const time = parseInstant(candidate.resetsAt);
+      if (time === undefined || time <= now) continue;
+      if (earliest === undefined || time < earliest) {
+        earliest = time;
+        at = candidate.resetsAt;
+      }
+    }
+  }
+  return at;
+}
+function sidebarReset(provider, window, now) {
+  if (parseInstant(window.resetsAt) !== undefined) {
+    return formatResetDays(window.resetsAt, now);
+  }
+  const fallback = accountResetFallback(provider, window, now);
+  if (fallback) return `next ${formatResetDays(fallback, now)}`;
+  return "?d";
 }
 function sourceLabel(source) {
   if (source === "header") return "headers";
   return source;
 }
-function windowDetail(window, now) {
+function windowDetail(window, now, resetNote) {
   const parts = [];
   if (window.used !== undefined) {
     if (window.limit !== undefined && window.unit) {
@@ -181,8 +246,12 @@ function windowDetail(window, now) {
   } else if (window.usedPercent !== undefined) {
     parts.push(`used ${formatPercent(window.usedPercent)}%`);
   }
-  const reset = resetText(window.resetsAt, now);
-  if (reset) parts.push(`reset ${reset}`);
+  if (resetNote) {
+    parts.push(resetNote);
+  } else {
+    const reset = resetText(window.resetsAt, now);
+    if (reset) parts.push(`reset ${reset}`);
+  }
   const observed = ageLabel(window.observedAt, now);
   if (observed) parts.push(`observed ${observed}`);
   parts.push(`source: ${sourceLabel(window.source)}`);
@@ -200,16 +269,16 @@ function compactWindowLine(window) {
   const remaining = compactRemainingLabel(window);
   return bar ? `${windowHead(window)} ${bar} ${remaining}` : `${windowHead(window)} ${remaining}`;
 }
-function pushCompactWindow(rows, window, now, indent) {
+function pushCompactWindow(rows, provider, window, now, indent) {
   const base = compactWindowLine(window);
-  const reset = resetText(window.resetsAt, now);
-  const suffix = reset ? `, reset ${reset}` : "";
-  if (!reset || base.length + suffix.length + indent <= TUI_SIDEBAR_MAX_WIDTH) {
+  const reset = sidebarReset(provider, window, now);
+  const suffix = ` ${reset}`;
+  if (base.length + suffix.length + indent <= TUI_SIDEBAR_MAX_WIDTH) {
     pushWrapped(rows, `${base}${suffix}`, "text", indent);
     return;
   }
   pushWrapped(rows, base, "text", indent);
-  pushWrapped(rows, `reset ${reset}`, "muted", indent);
+  pushWrapped(rows, reset, "muted", indent);
 }
 function resolveReading(input) {
   const snapshot = input.snapshot;
@@ -278,32 +347,34 @@ export function quotaSidebarRows(input) {
       pushWrapped(rows, "No pooled windows.", "muted");
     }
     for (const window of provider.pooled.windows) {
-      pushCompactWindow(rows, window, reading.now, 0);
+      pushCompactWindow(rows, provider, window, reading.now, 0);
     }
     if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
       pushWrapped(rows, "Accounts", "muted");
       for (const account of provider.accounts) {
-        pushWrapped(rows, `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state), 2);
+        pushWrapped(rows, `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state), 0);
         if (account.windows.length === 0) {
-          pushWrapped(rows, "Quota unknown.", "muted", 2);
+          pushWrapped(rows, "Quota unknown.", "muted", 0);
         }
         for (const window of account.windows) {
-          pushCompactWindow(rows, window, reading.now, 2);
+          pushCompactWindow(rows, provider, window, reading.now, 0);
         }
       }
     }
   });
   return rows;
 }
-function pushWindowDetail(rows, window, now, indent) {
+function pushWindowDetail(rows, provider, window, now, indent) {
   const bar = remainingBar(window);
   const headline = `${windowHead(window)}: ${remainingLabel(window)}${bar ? `  ${bar}` : ""}`;
+  const fallback = window.resetsAt === undefined ? accountResetFallback(provider, window, now) : undefined;
+  const resetNote = fallback ? `next account reset ${formatResetDays(fallback, now)}` : undefined;
   rows.push({
     text: `${" ".repeat(indent)}${headline}`,
     tone: "text"
   });
   rows.push({
-    text: `${" ".repeat(indent + 2)}${windowDetail(window, now)}`,
+    text: `${" ".repeat(indent + 2)}${windowDetail(window, now, resetNote)}`,
     tone: "muted"
   });
 }
@@ -319,7 +390,7 @@ function pushProvider(rows, provider, now) {
     });
   }
   for (const window of provider.pooled.windows) {
-    pushWindowDetail(rows, window, now, 2);
+    pushWindowDetail(rows, provider, window, now, 2);
   }
   const poolMeta = [];
   const nextReset = resetText(provider.pooled.nextResetAt, now);
@@ -347,7 +418,7 @@ function pushProvider(rows, provider, now) {
         });
       }
       for (const window of account.windows) {
-        pushWindowDetail(rows, window, now, 4);
+        pushWindowDetail(rows, provider, window, now, 4);
       }
     }
   }

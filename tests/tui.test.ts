@@ -4,7 +4,9 @@ import test from "node:test";
 import plugin, {
   ageLabel,
   createQuotaStore,
+  formatDayCount,
   formatDuration,
+  formatResetDays,
   QUOTA_STALE_AFTER_MS,
   quotaDialogRows,
   quotaDialogSubtitle,
@@ -15,7 +17,7 @@ import plugin, {
   TUI_SIDEBAR_MAX_WIDTH,
   type QuotaReading,
 } from "../src/tui.tsx";
-import type { QuotaSnapshot, QuotaWindow } from "../src/quota.ts";
+import type { QuotaAccount, QuotaSnapshot, QuotaWindow } from "../src/quota.ts";
 import { quotaRpc } from "../src/rpc.ts";
 
 const NOW = Date.parse("2026-10-24T12:00:00.000Z");
@@ -147,12 +149,12 @@ test("exhausted windows keep the percent and one explicit marker", () => {
 
   const exhausted = snapshot(window({ usedPercent: 0, exhausted: true }));
   const sidebar = joined(quotaSidebarRows(reading({ snapshot: exhausted })));
-  assert.ok(sidebar.includes("Weekly ██████████ 100% exhausted"));
+  assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▰▰▰▰ 100% exhausted ?d"));
   assert.equal((sidebar.match(/exhausted/gu) ?? []).length, 1);
 
   const zero = snapshot(window({ usedPercent: 100, exhausted: true }));
   const zeroSidebar = joined(quotaSidebarRows(reading({ snapshot: zero })));
-  assert.ok(zeroSidebar.includes("Weekly ░░░░░░░░░░ 0% exhausted"));
+  assert.ok(zeroSidebar.includes("Weekly ▱▱▱▱▱▱▱▱▱▱ 0% exhausted ?d"));
 
   const dialog = joined(quotaDialogRows(reading({ snapshot: exhausted })));
   assert.ok(dialog.includes("Weekly: 100% left, exhausted"));
@@ -161,18 +163,34 @@ test("exhausted windows keep the percent and one explicit marker", () => {
 
   const unknown = snapshot(window({ exhausted: true }));
   const unknownSidebar = joined(quotaSidebarRows(reading({ snapshot: unknown })));
-  assert.ok(unknownSidebar.includes("Weekly exhausted"));
+  assert.ok(unknownSidebar.includes("Weekly exhausted ?d"));
   assert.equal((unknownSidebar.match(/exhausted/gu) ?? []).length, 1);
 });
 
+test("days remaining are compact and never round a future reset to 0d", () => {
+  assert.equal(formatDayCount(1), "0.1d");
+  assert.equal(formatDayCount(HOUR), "0.1d");
+  assert.equal(formatDayCount(11 * HOUR), "0.5d");
+  assert.equal(formatDayCount(23 * HOUR), "1d");
+  assert.equal(formatDayCount(24 * HOUR), "1d");
+  assert.equal(formatDayCount(2 * 24 * HOUR), "2d");
+  assert.equal(formatDayCount(2.4 * 24 * HOUR), "2.4d");
+  assert.equal(formatDayCount(29 * 24 * HOUR), "29d");
+  assert.equal(formatDayCount(0), "0d");
+  assert.equal(formatDayCount(-HOUR), "0d");
+  assert.equal(formatResetDays(undefined, NOW), "?d");
+  assert.equal(formatResetDays(at(-HOUR), NOW), "0d");
+  assert.equal(formatResetDays(at(2 * HOUR), NOW), "0.1d");
+});
+
 test("bars show known remaining percentages and never draw unknown values", () => {
-  const full = "█".repeat(10);
-  const empty = "░".repeat(10);
+  const full = "▰".repeat(10);
+  const empty = "▱".repeat(10);
 
   assert.equal(remainingBar(window({ usedPercent: 0 })), full);
   assert.equal(remainingBar(window({ usedPercent: 100 })), empty);
-  assert.equal(remainingBar(window({ usedPercent: 8.5 })), `${"█".repeat(9)}░`);
-  assert.equal(remainingBar(window({ usedPercent: 38 })), `${"█".repeat(6)}${"░".repeat(4)}`);
+  assert.equal(remainingBar(window({ usedPercent: 8.5 })), `${"▰".repeat(9)}▱`);
+  assert.equal(remainingBar(window({ usedPercent: 38 })), `${"▰".repeat(6)}${"▱".repeat(4)}`);
   assert.equal(remainingBar(window({ usedPercent: 100, exhausted: true })), empty);
   assert.equal(remainingBar(window({})), undefined);
   assert.equal(remainingBar(window({ exhausted: true })), undefined);
@@ -188,12 +206,12 @@ test("bars show known remaining percentages and never draw unknown values", () =
     ],
   };
   const unknownSidebar = joined(quotaSidebarRows(reading({ snapshot: unknownSnapshot })));
-  assert.ok(unknownSidebar.includes("Weekly unknown"));
-  assert.ok(!/[█░]/u.test(unknownSidebar), "an unknown value must not have a bar");
+  assert.ok(unknownSidebar.includes("Weekly unknown ?d"));
+  assert.ok(!/[▰▱]/u.test(unknownSidebar), "an unknown value must not have a bar");
 
   const unknownDialog = joined(quotaDialogRows(reading({ snapshot: unknownSnapshot })));
   assert.ok(unknownDialog.includes("Weekly: remaining unknown"));
-  assert.ok(!/[█░]/u.test(unknownDialog), "an unknown value must not have a dialog bar");
+  assert.ok(!/[▰▱]/u.test(unknownDialog), "an unknown value must not have a dialog bar");
 });
 
 test("OpenAI shows pooled bars only while other providers keep accounts", () => {
@@ -233,13 +251,13 @@ test("OpenAI shows pooled bars only while other providers keep accounts", () => 
 
   const sidebarRows = quotaSidebarRows(value);
   const sidebar = joined(sidebarRows);
-  assert.ok(sidebar.includes("5-hour █████████░ 86%"));
-  assert.ok(sidebar.includes("Weekly █████████░ 91.5%"));
+  assert.ok(sidebar.includes("5-hour ▰▰▰▰▰▰▰▰▰▱ 86% ?d"));
+  assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▰▰▰▱ 91.5% ?d"));
   assert.ok(!sidebar.includes("main/p56d532"), "OpenAI account names stay hidden");
   assert.ok(!sidebar.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
   assert.ok(sidebar.includes("work: available"), "other providers keep account states");
-  assert.ok(sidebar.includes("Go account weekly ████░░░░░░ 40%"), "other providers keep account windows");
-  assert.ok(textOf(sidebarRows).includes("  work: available"), "account hierarchy stays minimal");
+  assert.ok(sidebar.includes("Go account weekly ▰▰▰▰▱▱▱▱▱▱ 40% ?d"), "other providers keep account windows");
+  assert.ok(textOf(sidebarRows).includes("work: available"), "account hierarchy stays flat");
   assert.ok(!textOf(sidebarRows).includes("Pooled"));
 
   const dialog = joined(quotaDialogRows(value));
@@ -249,6 +267,186 @@ test("OpenAI shows pooled bars only while other providers keep accounts", () => 
   assert.ok(!dialog.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
   assert.ok(dialog.includes("work: available"));
   assert.ok(dialog.includes("Go account weekly: 40% left"));
+});
+
+test("OpenAI pooled resets use own dates, then matching future account dates", () => {
+  const resetSnapshot = (
+    provider: string,
+    pooled: QuotaWindow[],
+    accounts: QuotaAccount[],
+  ): QuotaSnapshot => ({
+    ...SNAPSHOT,
+    providers: [{ provider, pooled: { windows: pooled }, accounts }],
+  });
+  const read = (snapshot: QuotaSnapshot) =>
+    joined(quotaSidebarRows(reading({ snapshot })));
+
+  const accountWindows: QuotaWindow[] = [
+    window({ kind: "daily", label: "Daily", usedPercent: 20, resetsAt: at(HOUR) }),
+    window({ usedPercent: 20, scopeModel: "gpt-5.2", resetsAt: at(HOUR) }),
+    window({ usedPercent: 20, resetsAt: at(-HOUR) }),
+    window({ usedPercent: 20, resetsAt: at(5 * HOUR) }),
+    window({ usedPercent: 20, resetsAt: at(12 * HOUR) }),
+  ];
+  const fallbackSnapshot = resetSnapshot("openai", [window({ usedPercent: 38 })], [
+    { label: "main", state: "available", windows: accountWindows },
+  ]);
+  const fallback = read(fallbackSnapshot);
+  assert.ok(fallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 0.2d"));
+  assert.ok(!fallback.includes("main"), "OpenAI account rows stay hidden");
+  assert.ok(
+    joined(quotaDialogRows(reading({ snapshot: fallbackSnapshot }))).includes(
+      "next account reset 0.2d",
+    ),
+    "the dialog explains the account-reset fallback",
+  );
+
+  const priority = read(
+    resetSnapshot("openai", [window({ usedPercent: 38, resetsAt: at(48 * HOUR) })], [
+      {
+        label: "main",
+        state: "available",
+        windows: [window({ usedPercent: 20, resetsAt: at(5 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(priority.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 2d"));
+  assert.ok(!priority.includes("next"), "the pooled reset wins");
+
+  const unknown = read(
+    resetSnapshot("openai", [window({ usedPercent: 38 })], [
+      {
+        label: "main",
+        state: "available",
+        windows: [
+          window({ kind: "daily", label: "Daily", usedPercent: 20, resetsAt: at(HOUR) }),
+          window({ usedPercent: 20, resetsAt: at(-HOUR) }),
+        ],
+      },
+    ]),
+  );
+  assert.ok(unknown.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% ?d"));
+
+  const custom = read(
+    resetSnapshot(
+      "openai",
+      [window({ kind: "custom", label: "Custom A", usedPercent: 38 })],
+      [
+        {
+          label: "main",
+          state: "available",
+          windows: [
+            window({ kind: "custom", label: "Custom B", usedPercent: 20, resetsAt: at(HOUR) }),
+            window({ kind: "custom", label: "Custom A", usedPercent: 20, resetsAt: at(5 * HOUR) }),
+          ],
+        },
+      ],
+    ),
+  );
+  assert.ok(custom.includes("Custom A ▰▰▰▰▰▰▱▱▱▱ 62% next 0.2d"));
+
+  const eligible = read(
+    resetSnapshot("openai", [window({ usedPercent: 38 })], [
+      {
+        label: "paused",
+        state: "paused",
+        windows: [window({ usedPercent: 20, resetsAt: at(HOUR) })],
+      },
+      {
+        label: "reauth",
+        state: "reauth",
+        windows: [window({ usedPercent: 20, resetsAt: at(2 * HOUR) })],
+      },
+      {
+        label: "unknown-state",
+        state: "unknown",
+        windows: [window({ usedPercent: 20, resetsAt: at(3 * HOUR) })],
+      },
+      {
+        label: "eligible",
+        state: "available",
+        windows: [window({ usedPercent: 20, resetsAt: at(5 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(
+    eligible.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 0.2d"),
+    "inactive account dates are skipped",
+  );
+
+  const ineligible = read(
+    resetSnapshot("openai", [window({ usedPercent: 38 })], [
+      {
+        label: "paused",
+        state: "paused",
+        windows: [window({ usedPercent: 20, resetsAt: at(HOUR) })],
+      },
+      {
+        label: "reauth",
+        state: "reauth",
+        windows: [window({ usedPercent: 20, resetsAt: at(2 * HOUR) })],
+      },
+      {
+        label: "unknown-state",
+        state: "unknown",
+        windows: [window({ usedPercent: 20, resetsAt: at(3 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(ineligible.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% ?d"));
+
+  const exhausted = read(
+    resetSnapshot("openai", [window({ usedPercent: 38 })], [
+      {
+        label: "paused",
+        state: "paused",
+        windows: [window({ usedPercent: 20, resetsAt: at(HOUR) })],
+      },
+      {
+        label: "exhausted",
+        state: "exhausted",
+        windows: [window({ usedPercent: 100, resetsAt: at(5 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(
+    exhausted.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 0.2d"),
+    "an exhausted account reset can restore quota",
+  );
+
+  const scopedRows = quotaSidebarRows(
+    reading({
+      snapshot: resetSnapshot(
+        "openai",
+        [window({ usedPercent: 38, scopeModel: "gpt-5.2" })],
+        [
+          {
+            label: "main",
+            state: "available",
+            windows: [
+              window({ usedPercent: 20, scopeModel: "gpt-5.2", resetsAt: at(5 * HOUR) }),
+            ],
+          },
+        ],
+      ),
+    }),
+  );
+  assert.ok(joined(scopedRows).includes("next 0.2d"));
+  for (const row of scopedRows) {
+    assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
+  }
+
+  const other = read(
+    resetSnapshot("opencode-go", [window({ usedPercent: 38 })], [
+      {
+        label: "work",
+        state: "available",
+        windows: [window({ usedPercent: 20, resetsAt: at(5 * HOUR) })],
+      },
+    ]),
+  );
+  assert.ok(other.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% ?d"));
+  assert.ok(!other.includes("next"), "other providers do not borrow account dates");
 });
 
 test("age labels are compact and bounded", () => {
@@ -268,9 +466,9 @@ test("sidebar keeps every provider, pooled window, account, and model scope", ()
   assert.ok(text.includes("second-provider"));
   assert.ok(!text.includes("Pooled"));
   assert.ok(all.includes("Accounts"));
-  assert.ok(all.includes("Weekly ██████░░░░ 62%, reset in 2h"));
-  assert.ok(all.includes("Daily (gpt-5.2) unknown"));
-  assert.ok(all.includes("Credits ░░░░░░░░░░ 0% exhausted"));
+  assert.ok(all.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 0.1d"));
+  assert.ok(all.includes("Daily (gpt-5.2) unknown ?d"));
+  assert.ok(all.includes("Credits ▱▱▱▱▱▱▱▱▱▱ 0% exhausted ?d"));
   assert.ok(all.includes("Team (Pro): exhausted"));
   assert.ok(all.includes("Personal: available"));
   assert.ok(all.includes("No pooled windows."));
@@ -319,9 +517,8 @@ test("sidebar layout is flat and compact", () => {
 
   assert.deepEqual(text, [
     "openai",
-    "5h █████████░ 86%, reset in 2h",
-    "Weekly (gpt-5.2) ███████░░░ 70%",
-    "reset in 3h",
+    "5h ▰▰▰▰▰▰▰▰▰▱ 86% 0.1d",
+    "Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 0.1d",
   ]);
   assert.ok(!text.includes("Pooled"));
   assert.ok(!rows.some((row) => row.text === ""), "no blank separator rows");
@@ -333,8 +530,8 @@ test("account windows stay visible when pooled windows are empty", () => {
   const sidebar = joined(quotaSidebarRows(value));
   assert.ok(sidebar.includes("No pooled windows."));
   assert.ok(sidebar.includes("Shared: available"));
-  assert.ok(sidebar.includes("Weekly (gpt-5.2) ███████░░░ 70%"));
-  assert.ok(sidebar.includes("reset in 3h"));
+  assert.ok(sidebar.includes("Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 0.1d"));
+  assert.ok(sidebar.includes("0.1d"));
   assert.ok(sidebar.includes("70%"), "the real account percentage must be shown");
   assert.ok(sidebar.includes("Empty: unknown"));
   assert.ok(sidebar.includes("Quota unknown."), "an empty account is unknown, not zero");
