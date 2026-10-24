@@ -256,6 +256,8 @@ test("OpenAI shows pooled bars only while other providers keep accounts", () => 
   const sidebar = joined(sidebarRows);
   assert.ok(sidebar.includes("5-hour ▰▰▰▰▰▰▰▰▰▱ 86% ?d"));
   assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▰▰▰▱ 91.5% ?d"));
+  assert.equal(sidebarRows[0]?.text, "open-ai", "sidebar title uses display copy");
+  assert.ok(!/(?:^|\n)openai(?:\n|$)/.test(textOf(sidebarRows)), "sidebar hides the raw provider id");
   assert.ok(!sidebar.includes("main/p56d532"), "OpenAI account names stay hidden");
   assert.ok(!sidebar.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
   assert.ok(sidebar.includes("work: available"), "other providers keep account states");
@@ -266,6 +268,8 @@ test("OpenAI shows pooled bars only while other providers keep accounts", () => 
   const dialog = joined(quotaDialogRows(value));
   assert.ok(dialog.includes("5-hour: 86% left"));
   assert.ok(dialog.includes("Weekly: 91.5% left"));
+  assert.ok(dialog.includes("open-ai"), "dialog title uses display copy");
+  assert.ok(!/(?:^|\n)openai(?:\n|$)/.test(joined(quotaDialogRows(value))), "dialog hides the raw provider id");
   assert.ok(!dialog.includes("main/p56d532"), "OpenAI account names stay hidden in the dialog");
   assert.ok(!dialog.includes("OpenAI account weekly"), "OpenAI account windows stay hidden");
   assert.ok(dialog.includes("work: available"));
@@ -295,7 +299,8 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
     { label: "main", state: "available", windows: accountWindows },
   ]);
   const fallback = read(fallbackSnapshot);
-  assert.ok(fallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 5h"));
+  assert.ok(fallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 5h"));
+  assert.ok(!fallback.includes("next"), "compact sidebar fallback omits the next prefix");
   assert.ok(!fallback.includes("main"), "OpenAI account rows stay hidden");
   assert.ok(
     joined(quotaDialogRows(reading({ snapshot: fallbackSnapshot }))).includes(
@@ -313,7 +318,7 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
       },
     ]),
   );
-  assert.ok(weekFallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 7d"));
+  assert.ok(weekFallback.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 7d"));
 
   const priority = read(
     resetSnapshot("openai", [window({ usedPercent: 38, resetsAt: at(48 * HOUR) })], [
@@ -357,7 +362,7 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
       ],
     ),
   );
-  assert.ok(custom.includes("Custom A ▰▰▰▰▰▰▱▱▱▱ 62% next 5h"));
+  assert.ok(custom.includes("Custom A ▰▰▰▰▰▰▱▱▱▱ 62% 5h"));
 
   const eligible = read(
     resetSnapshot("openai", [window({ usedPercent: 38 })], [
@@ -384,7 +389,7 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
     ]),
   );
   assert.ok(
-    eligible.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 5h"),
+    eligible.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 5h"),
     "inactive account dates are skipped",
   );
 
@@ -424,7 +429,7 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
     ]),
   );
   assert.ok(
-    exhausted.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% next 5h"),
+    exhausted.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 5h"),
     "an exhausted account reset can restore quota",
   );
 
@@ -445,7 +450,7 @@ test("OpenAI pooled resets use own dates, then matching future account dates", (
       ),
     }),
   );
-  assert.ok(joined(scopedRows).includes("next 5h"));
+  assert.ok(joined(scopedRows).includes("62% 5h"));
   for (const row of scopedRows) {
     assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
   }
@@ -530,7 +535,7 @@ test("sidebar layout is flat and compact", () => {
   const text = textOf(rows);
 
   assert.deepEqual(text, [
-    "openai",
+    "open-ai",
     "5h ▰▰▰▰▰▰▰▰▰▱ 86% 2h",
     "Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 3h",
   ]);

@@ -180,6 +180,9 @@ const ACCOUNT_STATE_LABELS = {
 function accountTone(state) {
   return state === "exhausted" || state === "reauth" ? "warning" : "text";
 }
+function providerTitle(provider) {
+  return sanitize(provider.trim().toLowerCase() === "openai" ? "open-ai" : provider);
+}
 
 /** Providers that expose pooled quota only; their account rows stay hidden. */
 const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
@@ -223,7 +226,7 @@ function sidebarReset(provider, window, now) {
     return formatResetCountdown(window.resetsAt, now);
   }
   const fallback = accountResetFallback(provider, window, now);
-  if (fallback) return `next ${formatResetCountdown(fallback, now)}`;
+  if (fallback) return formatResetCountdown(fallback, now);
   return "?d";
 }
 function sourceLabel(source) {
@@ -339,7 +342,7 @@ export function quotaSidebarRows(input) {
     return rows;
   }
   reading.providers.forEach(provider => {
-    pushWrapped(rows, provider.provider, "title");
+    pushWrapped(rows, providerTitle(provider.provider), "title");
     if (provider.pooled.windows.length === 0) {
       pushWrapped(rows, "No pooled windows.", "muted");
     }
@@ -377,7 +380,7 @@ function pushWindowDetail(rows, provider, window, now, indent) {
 }
 function pushProvider(rows, provider, now) {
   rows.push({
-    text: sanitize(provider.provider),
+    text: providerTitle(provider.provider),
     tone: "title"
   });
   if (provider.pooled.windows.length === 0) {

@@ -275,6 +275,10 @@ function accountTone(state: QuotaAccountState): QuotaTone {
   return state === "exhausted" || state === "reauth" ? "warning" : "text";
 }
 
+function providerTitle(provider: string): string {
+  return sanitize(provider.trim().toLowerCase() === "openai" ? "open-ai" : provider);
+}
+
 /** Providers that expose pooled quota only; their account rows stay hidden. */
 const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
 
@@ -328,7 +332,7 @@ function sidebarReset(
     return formatResetCountdown(window.resetsAt, now);
   }
   const fallback = accountResetFallback(provider, window, now);
-  if (fallback) return `next ${formatResetCountdown(fallback, now)}`;
+  if (fallback) return formatResetCountdown(fallback, now);
   return "?d";
 }
 
@@ -458,7 +462,7 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
   }
 
   reading.providers.forEach((provider) => {
-    pushWrapped(rows, provider.provider, "title");
+    pushWrapped(rows, providerTitle(provider.provider), "title");
     if (provider.pooled.windows.length === 0) {
       pushWrapped(rows, "No pooled windows.", "muted");
     }
@@ -508,7 +512,7 @@ function pushWindowDetail(
 }
 
 function pushProvider(rows: QuotaRow[], provider: QuotaProvider, now: number): void {
-  rows.push({ text: sanitize(provider.provider), tone: "title" });
+  rows.push({ text: providerTitle(provider.provider), tone: "title" });
   if (provider.pooled.windows.length === 0) {
     rows.push({ text: "  No pooled windows.", tone: "muted" });
   }
