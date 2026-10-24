@@ -186,6 +186,55 @@ test("reset countdowns use minutes, hours, then whole days", () => {
   assert.equal(formatResetCountdown(at(5 * HOUR), NOW), "5h");
 });
 
+test("five-hour sidebar resets show hours plus minutes, others stay compact", () => {
+  assert.equal(formatCountdown(4 * HOUR + 12 * MINUTE, true), "4h 12m");
+  assert.equal(formatCountdown(43 * MINUTE, true), "43m");
+  assert.equal(formatCountdown(4 * HOUR, true), "4h");
+  assert.equal(formatCountdown(4 * HOUR + 12 * MINUTE), "4h");
+  assert.equal(formatResetCountdown(at(4 * HOUR + 12 * MINUTE), NOW), "4h");
+
+  const burst = (overrides: Partial<QuotaWindow> = {}) =>
+    window({ kind: "burst_5h", label: "5h", usedPercent: 14, ...overrides });
+  const snapshot = (
+    provider: string,
+    pooled: QuotaWindow[],
+    accounts: QuotaAccount[] = [],
+  ): QuotaSnapshot => ({
+    ...SNAPSHOT,
+    providers: [{ provider, pooled: { windows: pooled }, accounts }],
+  });
+  const read = (value: QuotaSnapshot) => joined(quotaSidebarRows(reading({ snapshot: value })));
+
+  assert.ok(
+    read(snapshot("opencode-go", [burst({ resetsAt: at(4 * HOUR + 12 * MINUTE) })])).includes(
+      "86% 4h 12m",
+    ),
+  );
+  assert.ok(read(snapshot("opencode-go", [burst({ resetsAt: at(43 * MINUTE) })])).includes("86% 43m"));
+  assert.ok(read(snapshot("opencode-go", [burst({ resetsAt: at(4 * HOUR) })])).includes("86% 4h"));
+  assert.ok(
+    read(
+      snapshot("opencode-go", [
+        window({ usedPercent: 14, resetsAt: at(4 * HOUR + 12 * MINUTE) }),
+      ]),
+    ).includes("86% 4h"),
+    "non-five-hour windows keep whole hours",
+  );
+  assert.ok(read(snapshot("opencode-go", [burst({ resetsAt: at(-HOUR) })])).includes("86% due"));
+  assert.ok(read(snapshot("opencode-go", [burst()])).includes("86% ?d"));
+
+  const fallback = read(
+    snapshot("openai", [burst({ usedPercent: 38 })], [
+      {
+        label: "main",
+        state: "available",
+        windows: [burst({ usedPercent: 20, resetsAt: at(4 * HOUR + 12 * MINUTE) })],
+      },
+    ]),
+  );
+  assert.ok(fallback.includes("62% 4h 12m"), "the account-reset fallback keeps hours and minutes");
+});
+
 test("bars show known remaining percentages and never draw unknown values", () => {
   const full = "▰".repeat(10);
   const empty = "▱".repeat(10);

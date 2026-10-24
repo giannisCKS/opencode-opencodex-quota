@@ -99,23 +99,31 @@ const DAY_MS = 86_400_000;
 
 /**
  * Compact reset countdown. Minutes under one hour (rounded up, at least 1m),
- * hours under one day, then whole days. A due or past reset reads due.
+ * hours under one day, then whole days. With `includeMinutes`, hours also show
+ * their remaining minutes (4h 12m), unless they are zero (4h). A due or past
+ * reset reads due.
  */
-export function formatCountdown(value) {
+export function formatCountdown(value, includeMinutes = false) {
   if (!Number.isFinite(value) || value <= 0) return "due";
   if (value < 3_600_000) {
     return `${Math.max(1, Math.ceil(value / 60_000))}m`;
   }
   if (value < DAY_MS) {
+    if (includeMinutes) {
+      const minutes = Math.ceil(value / 60_000);
+      const hours = Math.floor(minutes / 60);
+      const rest = minutes % 60;
+      return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+    }
     return `${Math.max(1, Math.round(value / 3_600_000))}h`;
   }
   return `${Math.round(value / DAY_MS)}d`;
 }
 
 /** Countdown for a timestamp, or ?d when no timestamp exists. */
-export function formatResetCountdown(value, now) {
+export function formatResetCountdown(value, now, includeMinutes = false) {
   const time = parseInstant(value);
-  return time === undefined ? "?d" : formatCountdown(time - now);
+  return time === undefined ? "?d" : formatCountdown(time - now, includeMinutes);
 }
 function formatPercent(value) {
   const clamped = Math.min(100, Math.max(0, value));
@@ -222,11 +230,12 @@ function accountResetFallback(provider, window, now) {
   return at;
 }
 function sidebarReset(provider, window, now) {
+  const includeMinutes = window.kind === "burst_5h";
   if (parseInstant(window.resetsAt) !== undefined) {
-    return formatResetCountdown(window.resetsAt, now);
+    return formatResetCountdown(window.resetsAt, now, includeMinutes);
   }
   const fallback = accountResetFallback(provider, window, now);
-  if (fallback) return formatResetCountdown(fallback, now);
+  if (fallback) return formatResetCountdown(fallback, now, includeMinutes);
   return "?d";
 }
 function sourceLabel(source) {

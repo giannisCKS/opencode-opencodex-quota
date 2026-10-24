@@ -126,11 +126,13 @@ export declare function formatDuration(value: number): string;
 export declare function ageLabel(value: string | undefined, now: number): string | undefined;
 /**
  * Compact reset countdown. Minutes under one hour (rounded up, at least 1m),
- * hours under one day, then whole days. A due or past reset reads due.
+ * hours under one day, then whole days. With `includeMinutes`, hours also show
+ * their remaining minutes (4h 12m), unless they are zero (4h). A due or past
+ * reset reads due.
  */
-export declare function formatCountdown(value: number): string;
+export declare function formatCountdown(value: number, includeMinutes?: boolean): string;
 /** Countdown for a timestamp, or ?d when no timestamp exists. */
-export declare function formatResetCountdown(value: string | undefined, now: number): string;
+export declare function formatResetCountdown(value: string | undefined, now: number, includeMinutes?: boolean): string;
 /** Remaining quota, or an explicit unknown. A missing percent is never shown as zero. */
 export declare function remainingLabel(window: QuotaWindow): string;
 /** The bar width used in the sidebar and the dialog. */
