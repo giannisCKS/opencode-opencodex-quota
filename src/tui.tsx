@@ -384,38 +384,78 @@ function windowDetail(window: QuotaWindow, now: number, resetNote?: string): str
   return parts.join(" | ");
 }
 
-function compactRemainingLabel(window: QuotaWindow): string {
-  if (window.usedPercent !== undefined) {
-    const percent = `${formatPercent(100 - window.usedPercent)}%`;
-    return window.exhausted === true ? `${percent} exhausted` : percent;
-  }
-  return window.exhausted === true ? "exhausted" : "unknown";
-}
+type SidebarWindow = {
+  kind: "window";
+  label: string;
+  bar: string | undefined;
+  percent: string | undefined;
+  state: string | undefined;
+  exhausted: boolean;
+  reset: string;
+};
+type SidebarEntry = { kind: "line"; row: QuotaRow } | SidebarWindow;
 
-function compactWindowLine(window: QuotaWindow): string {
-  const bar = remainingBar(window);
-  const remaining = compactRemainingLabel(window);
-  return bar
-    ? `${windowHead(window)} ${bar} ${remaining}`
-    : `${windowHead(window)} ${remaining}`;
+function pushSidebarLine(entries: SidebarEntry[], text: string, tone: QuotaTone): void {
+  const lines: QuotaRow[] = [];
+  pushWrapped(lines, text, tone);
+  for (const row of lines) entries.push({ kind: "line", row });
 }
 
 function pushCompactWindow(
-  rows: QuotaRow[],
+  entries: SidebarEntry[],
   provider: QuotaProvider,
   window: QuotaWindow,
   now: number,
-  indent: number,
 ): void {
-  const base = compactWindowLine(window);
-  const reset = sidebarReset(provider, window, now);
-  const suffix = ` ${reset}`;
-  if (base.length + suffix.length + indent <= TUI_SIDEBAR_MAX_WIDTH) {
-    pushWrapped(rows, `${base}${suffix}`, "text", indent);
-    return;
+  const percent =
+    window.usedPercent === undefined ? undefined : `${formatPercent(100 - window.usedPercent)}%`;
+  entries.push({
+    kind: "window",
+    label: windowHead(window),
+    bar: remainingBar(window),
+    percent,
+    state: percent === undefined ? (window.exhausted === true ? "exhausted" : "unknown") : undefined,
+    exhausted: window.exhausted === true,
+    reset: sidebarReset(provider, window, now),
+  });
+}
+
+/**
+ * One label, bar, percentage, and reset column for every window row in the
+ * sidebar, across providers and accounts. A label too long for its column wraps
+ * onto its own lines, and an exhausted marker moves below rather than widening
+ * the row.
+ */
+function renderSidebarEntries(entries: SidebarEntry[]): QuotaRow[] {
+  const windows = entries.filter((entry): entry is SidebarWindow => entry.kind === "window");
+  const percentWidth = windows.reduce((max, entry) => Math.max(max, entry.percent?.length ?? 0), 0);
+  const resetWidth = windows.reduce((max, entry) => Math.max(max, entry.reset.length), 0);
+  const widestLabel = windows.reduce((max, entry) => Math.max(max, entry.label.length), 0);
+  const fixed = QUOTA_BAR_WIDTH + 1 + percentWidth + 1 + resetWidth;
+  const labelWidth = Math.max(1, Math.min(widestLabel, TUI_SIDEBAR_MAX_WIDTH - fixed - 1));
+  const rows: QuotaRow[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "line") {
+      rows.push(entry.row);
+      continue;
+    }
+    const labels = wrapLine(entry.label, labelWidth);
+    for (const line of labels.slice(0, -1)) rows.push({ text: line, tone: "text" });
+    const label = (labels[labels.length - 1] ?? "").padEnd(labelWidth);
+    const tail =
+      entry.percent === undefined
+        ? (entry.state ?? "").padStart(QUOTA_BAR_WIDTH + 1 + percentWidth)
+        : `${entry.bar ?? " ".repeat(QUOTA_BAR_WIDTH)} ${entry.percent.padStart(percentWidth)}`;
+    const base = `${label} ${tail} ${entry.reset}`;
+    const marker = entry.exhausted && entry.percent !== undefined ? " exhausted" : "";
+    if (base.length + marker.length <= TUI_SIDEBAR_MAX_WIDTH) {
+      rows.push({ text: `${base}${marker}`, tone: "text" });
+      continue;
+    }
+    rows.push({ text: base, tone: "text" });
+    if (marker) rows.push({ text: "exhausted", tone: "muted" });
   }
-  pushWrapped(rows, base, "text", indent);
-  pushWrapped(rows, reset, "muted", indent);
+  return rows;
 }
 
 function resolveReading(input: QuotaReading) {
@@ -477,33 +517,33 @@ export function quotaSidebarRows(input: QuotaReading): QuotaRow[] {
     return rows;
   }
 
+  const entries: SidebarEntry[] = rows.map((row) => ({ kind: "line", row }));
   reading.providers.forEach((provider) => {
-    pushWrapped(rows, providerTitle(provider.provider), "title");
+    pushSidebarLine(entries, providerTitle(provider.provider), "title");
     if (provider.pooled.windows.length === 0) {
-      pushWrapped(rows, "No pooled windows.", "muted");
+      pushSidebarLine(entries, "No pooled windows.", "muted");
     }
     for (const window of provider.pooled.windows) {
-      pushCompactWindow(rows, provider, window, reading.now, 0);
+      pushCompactWindow(entries, provider, window, reading.now);
     }
     if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
-      pushWrapped(rows, "Accounts", "muted");
+      pushSidebarLine(entries, "Accounts", "muted");
       for (const account of provider.accounts) {
-        pushWrapped(
-          rows,
+        pushSidebarLine(
+          entries,
           `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`,
           accountTone(account.state),
-          0,
         );
         if (account.windows.length === 0) {
-          pushWrapped(rows, "Quota unknown.", "muted", 0);
+          pushSidebarLine(entries, "Quota unknown.", "muted");
         }
         for (const window of account.windows) {
-          pushCompactWindow(rows, provider, window, reading.now, 0);
+          pushCompactWindow(entries, provider, window, reading.now);
         }
       }
     }
   });
-  return rows;
+  return renderSidebarEntries(entries);
 }
 
 function pushWindowDetail(

@@ -16,6 +16,7 @@ import plugin, {
   remainingLabel,
   TUI_SIDEBAR_MAX_WIDTH,
   type QuotaReading,
+  type QuotaRow,
 } from "../src/tui.tsx";
 import type { QuotaAccount, QuotaSnapshot, QuotaWindow } from "../src/quota.ts";
 import { quotaRpc } from "../src/rpc.ts";
@@ -149,12 +150,12 @@ test("exhausted windows keep the percent and one explicit marker", () => {
 
   const exhausted = snapshot(window({ usedPercent: 0, exhausted: true }));
   const sidebar = joined(quotaSidebarRows(reading({ snapshot: exhausted })));
-  assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▰▰▰▰ 100% exhausted ?d"));
+  assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▰▰▰▰ 100% ?d exhausted"));
   assert.equal((sidebar.match(/exhausted/gu) ?? []).length, 1);
 
   const zero = snapshot(window({ usedPercent: 100, exhausted: true }));
   const zeroSidebar = joined(quotaSidebarRows(reading({ snapshot: zero })));
-  assert.ok(zeroSidebar.includes("Weekly ▱▱▱▱▱▱▱▱▱▱ 0% exhausted ?d"));
+  assert.ok(zeroSidebar.includes("Weekly ▱▱▱▱▱▱▱▱▱▱ 0% ?d exhausted"));
 
   const dialog = joined(quotaDialogRows(reading({ snapshot: exhausted })));
   assert.ok(dialog.includes("Weekly: 100% left, exhausted"));
@@ -536,7 +537,7 @@ test("sidebar keeps every provider, pooled window, account, and model scope", ()
   assert.ok(all.includes("Accounts"));
   assert.ok(all.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 2h"));
   assert.ok(all.includes("Daily (gpt-5.2) unknown ?d"));
-  assert.ok(all.includes("Credits ▱▱▱▱▱▱▱▱▱▱ 0% exhausted ?d"));
+  assert.ok(all.includes("Credits ▱▱▱▱▱▱▱▱▱▱ 0% ?d exhausted"));
   assert.ok(all.includes("Team (Pro): exhausted"));
   assert.ok(all.includes("Personal: available"));
   assert.ok(all.includes("No pooled windows."));
@@ -585,12 +586,97 @@ test("sidebar layout is flat and compact", () => {
 
   assert.deepEqual(text, [
     "open-ai",
-    "5h ▰▰▰▰▰▰▰▰▰▱ 86% 2h",
+    "5h               ▰▰▰▰▰▰▰▰▰▱ 86% 2h",
     "Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 3h",
   ]);
   assert.ok(!text.includes("Pooled"));
   assert.ok(!rows.some((row) => row.text === ""), "no blank separator rows");
   for (const row of text) assert.ok(!row.startsWith(" "), `not left aligned: ${row}`);
+});
+
+test("window rows share label, bar, percent, and reset columns across providers", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: {
+          windows: [
+            window({ kind: "burst_5h", label: "5-hour", usedPercent: 14, resetsAt: at(HOUR) }),
+            window({ label: "Weekly", usedPercent: 23, resetsAt: at(6 * 24 * HOUR) }),
+            window({ label: "Monthly", usedPercent: 13, resetsAt: at(29 * 24 * HOUR) }),
+          ],
+        },
+        accounts: [],
+      },
+      {
+        provider: "opencode-go",
+        pooled: {
+          windows: [
+            window({ kind: "burst_5h", label: "5-hour", usedPercent: 69, resetsAt: at(43 * MINUTE) }),
+            window({ label: "Weekly", usedPercent: 8.5, resetsAt: at(3 * 24 * HOUR) }),
+            window({ label: "Monthly", usedPercent: 29, resetsAt: at(1 * 24 * HOUR) }),
+          ],
+        },
+        accounts: [],
+      },
+    ],
+  };
+  const rows = quotaSidebarRows(reading({ snapshot }));
+  const windowRows = rows.filter((row) => /[▰▱]/u.test(row.text));
+  assert.equal(windowRows.length, 6);
+
+  const barStart = (row: QuotaRow) => row.text.search(/[▰▱]/u);
+  const percentEnd = (row: QuotaRow) => row.text.indexOf("%");
+  const resetStart = (row: QuotaRow) => row.text.indexOf("%") + 2;
+
+  assert.equal(new Set(windowRows.map(barStart)).size, 1, "bars start at one column");
+  assert.equal(new Set(windowRows.map(percentEnd)).size, 1, "percent signs end at one column");
+  assert.equal(new Set(windowRows.map(resetStart)).size, 1, "resets start at one column");
+  assert.deepEqual(
+    windowRows.map((row) => row.text.slice(resetStart(row)).trim()),
+    ["1h", "6d", "29d", "43m", "3d", "1d"],
+  );
+  assert.ok(
+    windowRows.some((row) => row.text.includes("91.5%")),
+    "a fractional percentage keeps the shared column",
+  );
+  for (const row of rows) {
+    assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
+  }
+});
+
+test("a long window label wraps without dropping quota or model scope", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: {
+          windows: [
+            window({ label: "Weekly", usedPercent: 38, resetsAt: at(2 * HOUR) }),
+            window({
+              kind: "burst_5h",
+              label: "Weekly (anthropic/claude-sonnet-4-20250514)",
+              usedPercent: 8.5,
+              resetsAt: at(4 * HOUR + 12 * MINUTE),
+            }),
+          ],
+        },
+        accounts: [],
+      },
+    ],
+  };
+  const rows = quotaSidebarRows(reading({ snapshot }));
+  const text = textOf(rows);
+
+  assert.ok(text.some((row) => row.includes("anthropic")));
+  assert.ok(text.join("").includes("20250514"), "a hard-broken scope is never truncated");
+  assert.ok(text.some((row) => row.includes("91.5%")));
+  assert.ok(text.some((row) => row.includes("4h 12m")));
+  for (const row of rows) {
+    assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
+  }
 });
 
 test("account windows stay visible when pooled windows are empty", () => {
