@@ -3,7 +3,9 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { ScrollBoxRenderable, TextAttributes, type RGBA } from "@opentui/core";
 import { type JSX, useTerminalDimensions } from "@opentui/solid";
-import { createSignal, Show } from "solid-js";
+// The renderer loads the client Solid runtime; bare "solid-js" resolves to the
+// server runtime under Node, whose signals never notify renderer effects.
+import { createSignal, Show } from "solid-js/dist/solid.js";
 
 import type {
   QuotaAccount,

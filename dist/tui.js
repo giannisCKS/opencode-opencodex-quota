@@ -12,7 +12,9 @@ import { createElement as _$createElement } from "@opentui/solid";
 import { Plugin } from "@opencode/plugin/tui";
 import { TextAttributes } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import { createSignal, Show } from "solid-js";
+// The renderer loads the client Solid runtime; bare "solid-js" resolves to the
+// server runtime under Node, whose signals never notify renderer effects.
+import { createSignal, Show } from "solid-js/dist/solid.js";
 import { quotaRpc } from "./rpc.js";
 const REFRESH_INTERVAL_MS = 60_000;
 const RPC_TIMEOUT_MS = 60_000;
