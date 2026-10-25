@@ -200,8 +200,32 @@ const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
 function isPooledOnlyProvider(provider) {
   return POOLED_ONLY_PROVIDERS.has(provider.provider.trim().toLowerCase());
 }
-function showsProviderAccounts(provider) {
-  return !isPooledOnlyProvider(provider);
+
+/**
+ * Pooled-only providers keep account rows hidden while pooled windows exist. An
+ * empty pool falls back to account quota, shown without account labels because
+ * those can carry opaque identifiers. Other providers always show labelled
+ * accounts. Returns undefined when the accounts stay hidden.
+ */
+function accountDisplay(provider) {
+  if (!isPooledOnlyProvider(provider)) return "labelled";
+  if (provider.pooled.windows.length > 0) return undefined;
+  return provider.accounts.length > 0 ? "generic" : undefined;
+}
+
+/** A numbered account head for the fallback, so an opaque label stays hidden. */
+function numberedAccountHead(account, index) {
+  const name = `Account ${index + 1}`;
+  const plan = account.plan ? sanitize(account.plan) : undefined;
+  return plan ? `${name} (${plan})` : name;
+}
+function hasAccountWindows(provider) {
+  return provider.accounts.some(account => account.windows.length > 0);
+}
+
+/** An empty pool is only "not reported" when no account window supplies quota. */
+function emptyPoolLabel(provider) {
+  return hasAccountWindows(provider) ? "No pooled windows." : "Quota not reported yet.";
 }
 
 /**
@@ -232,12 +256,18 @@ function accountResetFallback(provider, window, now) {
   }
   return at;
 }
-function sidebarReset(provider, window, now) {
+
+/**
+ * A window reset: its own date, or for a pooled row the next matching account
+ * date. Account rows never borrow another account's reset, so an account
+ * without its own date stays unknown.
+ */
+function sidebarReset(provider, window, now, borrowAccountReset) {
   const includeMinutes = window.kind === "burst_5h";
   if (parseInstant(window.resetsAt) !== undefined) {
     return formatResetCountdown(window.resetsAt, now, includeMinutes);
   }
-  const fallback = accountResetFallback(provider, window, now);
+  const fallback = borrowAccountReset ? accountResetFallback(provider, window, now) : undefined;
   if (fallback) return formatResetCountdown(fallback, now, includeMinutes);
   return "?d";
 }
@@ -277,7 +307,7 @@ function pushSidebarLine(entries, text, tone) {
     row
   });
 }
-function pushCompactWindow(entries, provider, window, now) {
+function pushCompactWindow(entries, provider, window, now, pooledRow) {
   const percent = window.usedPercent === undefined ? undefined : `${formatPercent(100 - window.usedPercent)}%`;
   entries.push({
     kind: "window",
@@ -286,7 +316,7 @@ function pushCompactWindow(entries, provider, window, now) {
     percent,
     state: percent === undefined ? window.exhausted === true ? "exhausted" : "unknown" : undefined,
     exhausted: window.exhausted === true,
-    reset: sidebarReset(provider, window, now)
+    reset: sidebarReset(provider, window, now, pooledRow)
   });
 }
 
@@ -377,7 +407,11 @@ export function quotaSidebarStatus(input) {
   return ageText(reading.age);
 }
 
-/** Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep accounts. */
+/**
+ * Compact sidebar rows. OpenAI keeps pooled windows only while they exist; an
+ * empty pool shows numbered account quota instead. Other providers keep
+ * labelled accounts.
+ */
 export function quotaSidebarRows(input) {
   const reading = resolveReading(input);
   const rows = [];
@@ -403,31 +437,33 @@ export function quotaSidebarRows(input) {
   }));
   reading.providers.forEach(provider => {
     pushSidebarLine(entries, providerTitle(provider.provider), "title");
+    const display = accountDisplay(provider);
     if (provider.pooled.windows.length === 0) {
-      pushSidebarLine(entries, "No pooled windows.", "muted");
+      pushSidebarLine(entries, emptyPoolLabel(provider), "muted");
     }
     for (const window of provider.pooled.windows) {
-      pushCompactWindow(entries, provider, window, reading.now);
+      pushCompactWindow(entries, provider, window, reading.now, true);
     }
-    if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
-      pushSidebarLine(entries, "Accounts", "muted");
-      for (const account of provider.accounts) {
-        pushSidebarLine(entries, `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state));
+    if (display) {
+      pushSidebarLine(entries, display === "generic" ? "Account quota" : "Accounts", "muted");
+      provider.accounts.forEach((account, index) => {
+        const head = display === "generic" ? numberedAccountHead(account, index) : accountHead(account);
+        pushSidebarLine(entries, `${head}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state));
         if (account.windows.length === 0) {
           pushSidebarLine(entries, "Quota unknown.", "muted");
         }
         for (const window of account.windows) {
-          pushCompactWindow(entries, provider, window, reading.now);
+          pushCompactWindow(entries, provider, window, reading.now, false);
         }
-      }
+      });
     }
   });
   return renderSidebarEntries(entries);
 }
-function pushWindowDetail(rows, provider, window, now, indent) {
+function pushWindowDetail(rows, provider, window, now, indent, pooledRow) {
   const bar = remainingBar(window);
   const headline = `${windowHead(window)}: ${remainingLabel(window)}${bar ? `  ${bar}` : ""}`;
-  const fallback = window.resetsAt === undefined ? accountResetFallback(provider, window, now) : undefined;
+  const fallback = pooledRow && window.resetsAt === undefined ? accountResetFallback(provider, window, now) : undefined;
   const resetNote = fallback ? `next account reset ${formatResetCountdown(fallback, now)}` : undefined;
   rows.push({
     text: `${" ".repeat(indent)}${headline}`,
@@ -443,32 +479,38 @@ function pushProvider(rows, provider, now) {
     text: providerTitle(provider.provider),
     tone: "title"
   });
+  const display = accountDisplay(provider);
   if (provider.pooled.windows.length === 0) {
     rows.push({
-      text: "  No pooled windows.",
+      text: `  ${emptyPoolLabel(provider)}`,
       tone: "muted"
     });
   }
   for (const window of provider.pooled.windows) {
-    pushWindowDetail(rows, provider, window, now, 2);
+    pushWindowDetail(rows, provider, window, now, 2, true);
   }
   const poolMeta = [];
   const nextReset = resetText(provider.pooled.nextResetAt, now);
-  if (nextReset) poolMeta.push(`next reset ${nextReset}`);
+  if (nextReset) {
+    // An empty pool's next reset is pool metadata; never read it as an account reset.
+    const prefix = provider.pooled.windows.length === 0 ? "pool next reset" : "next reset";
+    poolMeta.push(`${prefix} ${nextReset}`);
+  }
   if (poolMeta.length > 0) {
     rows.push({
       text: `  ${poolMeta.join(" | ")}`,
       tone: "muted"
     });
   }
-  if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
+  if (display) {
     rows.push({
-      text: "Accounts",
+      text: display === "generic" ? "Account quota" : "Accounts",
       tone: "muted"
     });
-    for (const account of provider.accounts) {
+    provider.accounts.forEach((account, index) => {
+      const head = display === "generic" ? numberedAccountHead(account, index) : accountHead(account);
       rows.push({
-        text: `  ${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`,
+        text: `  ${head}: ${ACCOUNT_STATE_LABELS[account.state]}`,
         tone: accountTone(account.state)
       });
       if (account.windows.length === 0) {
@@ -478,9 +520,9 @@ function pushProvider(rows, provider, now) {
         });
       }
       for (const window of account.windows) {
-        pushWindowDetail(rows, provider, window, now, 4);
+        pushWindowDetail(rows, provider, window, now, 4, false);
       }
-    }
+    });
   }
 }
 

@@ -144,7 +144,11 @@ export declare const QUOTA_BAR_WIDTH = 10;
 export declare function remainingBar(window: QuotaWindow, width?: number): string | undefined;
 /** The sidebar's one-line status. A null status means the rows carry the state. */
 export declare function quotaSidebarStatus(input: QuotaReading): string | undefined;
-/** Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep accounts. */
+/**
+ * Compact sidebar rows. OpenAI keeps pooled windows only while they exist; an
+ * empty pool shows numbered account quota instead. Other providers keep
+ * labelled accounts.
+ */
 export declare function quotaSidebarRows(input: QuotaReading): QuotaRow[];
 /** The full, scrollable dialog rows. No model request is made to build them. */
 export declare function quotaDialogRows(input: QuotaReading): QuotaRow[];

@@ -540,7 +540,7 @@ test("sidebar keeps every provider, pooled window, account, and model scope", ()
   assert.ok(all.includes("Credits ▱▱▱▱▱▱▱▱▱▱ 0% ?d exhausted"));
   assert.ok(all.includes("Team (Pro): exhausted"));
   assert.ok(all.includes("Personal: available"));
-  assert.ok(all.includes("No pooled windows."));
+  assert.ok(all.includes("Quota not reported yet."), "an empty pool with no window reads as unreported");
   assert.ok(all.includes("Spare: paused"));
   assert.ok(all.includes("Old: sign-in required"));
   assert.ok(all.includes("Mystery: unknown"));
@@ -699,6 +699,203 @@ test("account windows stay visible when pooled windows are empty", () => {
   assert.ok(!/(?:^|\s)0% left/.test(dialog));
 });
 
+test("an empty OpenAI pool falls back to clearly labelled account quota", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [] },
+        accounts: [
+          {
+            label: "main/p56d532",
+            plan: "Pro",
+            state: "available",
+            windows: [
+              window({ usedPercent: 30, scopeModel: "gpt-5.2", resetsAt: at(3 * HOUR) }),
+              window({ kind: "daily", label: "Daily" }),
+            ],
+          },
+          { label: "second/opaque-7f3", state: "paused", windows: [] },
+        ],
+      },
+    ],
+  };
+  const value = reading({ snapshot });
+
+  const sidebarRows = quotaSidebarRows(value);
+  const sidebar = joined(sidebarRows);
+  assert.ok(sidebar.includes("No pooled windows."));
+  assert.ok(sidebar.includes("Account quota"), "the fallback is labelled as account quota");
+  assert.ok(!sidebar.includes("Accounts"), "the pooled heading is not reused");
+  assert.ok(sidebar.includes("Account 1 (Pro): available"));
+  assert.ok(sidebar.includes("Account 2: paused"));
+  assert.ok(sidebar.includes("Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 3h"));
+  assert.ok(sidebar.includes("Daily unknown ?d"), "an unknown account percentage stays unknown");
+  assert.equal(
+    sidebarRows.filter((row) => /[▰▱]/u.test(row.text)).length,
+    1,
+    "only the reported account percentage draws a bar",
+  );
+  assert.ok(!sidebar.includes("main/p56d532"), "an opaque account label stays hidden");
+  assert.ok(!sidebar.includes("second/opaque-7f3"), "an opaque account label stays hidden");
+  assert.ok(!/(?:^|\s)0% left/.test(sidebar));
+
+  const dialog = joined(quotaDialogRows(value));
+  assert.ok(dialog.includes("No pooled windows."));
+  assert.ok(dialog.includes("Account quota"));
+  assert.ok(dialog.includes("Account 1 (Pro): available"));
+  assert.ok(dialog.includes("Account 2: paused"));
+  assert.ok(dialog.includes("Weekly (gpt-5.2): 70% left"));
+  assert.ok(dialog.includes("Daily: remaining unknown"));
+  assert.ok(!dialog.includes("main/p56d532"), "an opaque account label stays hidden in the dialog");
+  assert.ok(!dialog.includes("second/opaque-7f3"));
+  assert.ok(!/(?:^|\s)0% left/.test(dialog));
+});
+
+test("an empty OpenAI pool without account quota reads as not reported", () => {
+  const noAccounts: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [{ provider: "openai", pooled: { windows: [] }, accounts: [] }],
+  };
+  const sidebar = joined(quotaSidebarRows(reading({ snapshot: noAccounts })));
+  assert.ok(sidebar.includes("Quota not reported yet."));
+  assert.ok(!sidebar.includes("No pooled windows."));
+  assert.ok(!sidebar.includes("exhausted"), "missing quota is not exhaustion");
+  assert.ok(!sidebar.includes("%"), "no percentage is invented");
+
+  const dialog = joined(quotaDialogRows(reading({ snapshot: noAccounts })));
+  assert.ok(dialog.includes("Quota not reported yet."));
+  assert.ok(!dialog.includes("exhausted"), "missing quota is not exhaustion in the dialog");
+  assert.ok(!dialog.includes("%"), "no percentage is invented in the dialog");
+
+  const noWindows: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [] },
+        accounts: [{ label: "main/p56d532", state: "reauth", windows: [] }],
+      },
+    ],
+  };
+  const emptySidebarRows = quotaSidebarRows(reading({ snapshot: noWindows }));
+  const emptySidebar = joined(emptySidebarRows);
+  assert.ok(emptySidebar.includes("Quota not reported yet."));
+  assert.ok(emptySidebar.includes("Account 1: sign-in required"));
+  assert.ok(emptySidebar.includes("Quota unknown."));
+  assert.ok(!emptySidebar.includes("exhausted"));
+  assert.ok(!/[▰▱]/u.test(emptySidebar), "no bar without a reported percentage");
+  for (const row of emptySidebarRows) {
+    assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
+  }
+
+  const emptyDialog = joined(quotaDialogRows(reading({ snapshot: noWindows })));
+  assert.ok(emptyDialog.includes("Quota not reported yet."));
+  assert.ok(emptyDialog.includes("Account 1: sign-in required"));
+  assert.ok(!emptyDialog.includes("exhausted"));
+});
+
+test("an account quota row never borrows another account reset", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [] },
+        accounts: [
+          {
+            label: "first/opaque-a",
+            state: "available",
+            windows: [window({ usedPercent: 40 })],
+          },
+          {
+            label: "second/opaque-b",
+            state: "available",
+            windows: [window({ usedPercent: 20, resetsAt: at(5 * HOUR) })],
+          },
+        ],
+      },
+    ],
+  };
+  const value = reading({ snapshot });
+
+  const sidebarRows = quotaSidebarRows(value);
+  const windowRows = sidebarRows.filter((row) => /[▰▱]/u.test(row.text));
+  assert.equal(windowRows.length, 2);
+  assert.ok(/\s60% \?d$/u.test(windowRows[0].text), "an account without its own reset stays unknown");
+  assert.ok(/\s80% 5h$/u.test(windowRows[1].text), "the other account keeps its own reset");
+
+  const dialogRows = quotaDialogRows(value);
+  const first = dialogRows.findIndex((row) => row.text.includes("Weekly: 60% left"));
+  assert.ok(first >= 0);
+  assert.ok(
+    !dialogRows[first + 1]?.text.includes("5h"),
+    "the dialog detail borrows no other account reset",
+  );
+  assert.ok(
+    !joined(dialogRows).includes("next account reset"),
+    "no cross-account reset note for account rows",
+  );
+});
+
+test("an empty pool reset stays pool metadata, never an account reset", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [], nextResetAt: at(2 * HOUR) },
+        accounts: [
+          {
+            label: "main/opaque",
+            state: "available",
+            windows: [window({ usedPercent: 20, resetsAt: at(5 * HOUR) })],
+          },
+        ],
+      },
+    ],
+  };
+  const value = reading({ snapshot });
+
+  const sidebarRows = quotaSidebarRows(value);
+  const windowRows = sidebarRows.filter((row) => /[▰▱]/u.test(row.text));
+  assert.equal(windowRows.length, 1);
+  assert.ok(/\s80% 5h$/u.test(windowRows[0].text), "the account row keeps its own reset");
+  assert.ok(
+    !joined(sidebarRows).includes("2h"),
+    "the empty pool's next reset is not shown as an account reset",
+  );
+
+  const dialogRows = quotaDialogRows(value);
+  const poolRow = dialogRows.find((row) => row.text.includes("next reset"));
+  assert.ok(poolRow, "the dialog keeps the empty pool metadata");
+  assert.ok(
+    poolRow.text.trimStart().startsWith("pool next reset"),
+    "empty pool metadata names the pool",
+  );
+  assert.ok(
+    !joined(dialogRows).includes("next account reset"),
+    "an account row with its own reset borrows nothing",
+  );
+
+  const populated: QuotaSnapshot = {
+    ...SNAPSHOT,
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [window({ usedPercent: 30 })], nextResetAt: at(2 * HOUR) },
+        accounts: [],
+      },
+    ],
+  };
+  const populatedPoolRow = quotaDialogRows(reading({ snapshot: populated })).find((row) =>
+    row.text.includes("next reset"),
+  );
+  assert.ok(populatedPoolRow);
+  assert.equal(populatedPoolRow.text.trim(), "next reset in 2h", "a populated pool keeps the plain label");
+});
+
 test("sidebar status distinguishes fresh, stale, loading, unavailable, and empty", () => {
   assert.equal(quotaSidebarStatus(reading()), "2m ago");
 
@@ -752,7 +949,7 @@ test("dialog shows pooled and account quota, reset, observation, and source", ()
   assert.ok(text.includes("  Team (Pro): exhausted"));
   assert.ok(text.includes("  Personal: available"));
   assert.ok(all.includes("Weekly (gpt-5.2): 80% left"));
-  assert.ok(all.includes("No pooled windows."));
+  assert.ok(all.includes("Quota not reported yet."));
   assert.ok(text.includes("  Spare: paused"));
   assert.ok(text.includes("  Old: sign-in required"));
   assert.ok(text.includes("  Mystery: unknown"));
