@@ -1,6 +1,8 @@
 /**
  * The quota RPC between this plugin's server half and the TUI. The server
- * registers it during setup; the TUI calls its single `snapshot` method.
+ * registers it during setup; the TUI calls `snapshot` for a passive read and
+ * `refresh` for an active provider-report rebuild. Only `refresh` accepts an
+ * explicit `force` flag; snapshot input stays empty.
  *
  * Imports from `@opencode/*` stay type-only, so loading this module loads no
  * OpenCode package.
@@ -19,11 +21,16 @@ type QuotaRpcSchema<T> = StandardValueSchema & {
         };
     };
 };
-/** The `snapshot` input is empty: there is no refresh or reset-notice control. */
+/** The passive snapshot takes an empty input: no control is exposed. */
 export type QuotaSnapshotInput = Record<string, never>;
+/** The active refresh accepts only an optional explicit-refresh flag. */
+export type QuotaRefreshInput = {
+    force?: boolean;
+};
 /**
- * The single-method quota RPC. `snapshot` takes an empty input and returns the
- * current normalized OpenCodex pool reading.
+ * The quota RPC. `snapshot` reads the passive pool; `refresh` actively rebuilds
+ * provider reports and then rereads the passive pool. Automatic refreshes stay
+ * throttled server-side; only an explicit `force` bypasses the cooldown.
  */
 export declare const quotaRpc: {
     id: string;
@@ -31,6 +38,10 @@ export declare const quotaRpc: {
     methods: {
         snapshot: {
             input: QuotaRpcSchema<QuotaSnapshotInput>;
+            output: QuotaRpcSchema<QuotaSnapshot>;
+        };
+        refresh: {
+            input: QuotaRpcSchema<QuotaRefreshInput>;
             output: QuotaRpcSchema<QuotaSnapshot>;
         };
     };

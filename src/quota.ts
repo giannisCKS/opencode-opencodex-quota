@@ -1,10 +1,15 @@
 /**
- * Passive OpenCodex quota-pool reading.
+ * OpenCodex quota-pool reading.
  *
- * Reads the pinned `ocx.quota-pool/1` contract from the local OpenCodex
- * management API (`GET /api/quota-pool`). The admin token is used as a bearer
- * token and is never logged or returned. This module never triggers a refresh,
- * never falls back to another endpoint, and never invents a quota reading.
+ * Passive reads use the pinned `ocx.quota-pool/1` contract from the local
+ * OpenCodex management API (`GET /api/quota-pool`). The admin token is used as
+ * a bearer token and is never logged or returned.
+ *
+ * `refreshQuota` is the only active path: it asks OpenCodex to rebuild provider
+ * reports (`GET /api/provider-quotas?refresh=1`) and then rereads the passive
+ * pool. Active attempts are throttled and shared process-wide; an explicit
+ * request may bypass the throttle but still shares an in-flight attempt. No
+ * other endpoint is used, and no quota reading is invented locally.
  */
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -13,7 +18,14 @@ import { join } from "node:path";
 /** Fixed local OpenCodex quota-pool endpoint. Never configurable by callers. */
 export const OPENCODEX_QUOTA_ENDPOINT = "http://127.0.0.1:10100/api/quota-pool";
 
-/** Request timeout for the local management call. */
+/** Fixed local OpenCodex provider-report rebuild endpoint. Never configurable. */
+export const OPENCODEX_REFRESH_ENDPOINT =
+  "http://127.0.0.1:10100/api/provider-quotas?refresh=1";
+
+/** Minimum gap between active refresh attempts, successful or failed. */
+export const OPENCODEX_REFRESH_COOLDOWN_MS = 5 * 60_000;
+
+/** Request timeout for the local management calls. */
 export const OPENCODEX_QUOTA_TIMEOUT_MS = 10_000;
 
 /** Hard cap on the response body, to stay bounded on an untrusted local service. */
@@ -454,4 +466,79 @@ async function requestQuota(token: string | undefined): Promise<SnapshotBody> {
     return { providers: [], error: "Local quota service returned invalid JSON" };
   }
   return parseQuotaPool(payload);
+}
+
+/**
+ * The last active attempt, success or failure, and the attempt currently in
+ * flight. Both live at module scope so every plugin instance in this process
+ * shares one cooldown and one request.
+ */
+let lastRefreshAttemptAt = 0;
+let refreshInFlight: Promise<QuotaSnapshot> | undefined;
+
+/**
+ * Ask OpenCodex to rebuild provider reports. The response is never parsed or
+ * logged: only its status matters. The body is always cancelled unread.
+ * Returns a safe failure body, or null on a successful request.
+ */
+async function requestRefresh(token: string): Promise<SnapshotBody | null> {
+  let response: Response;
+  try {
+    response = await fetch(OPENCODEX_REFRESH_ENDPOINT, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(OPENCODEX_QUOTA_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return fetchFailure(error);
+  }
+
+  await cancelBody(response);
+  if (!response.ok) {
+    return { providers: [], error: `Local quota service returned HTTP ${response.status}` };
+  }
+  return null;
+}
+
+/** One active attempt followed by a passive read on success. */
+async function performRefresh(): Promise<QuotaSnapshot> {
+  const token = await resolveAdminToken();
+  // Without a token there is nothing to authorize: no request, no cooldown.
+  if (!token) return fetchQuota();
+
+  // Set before the request so a failure also holds the cooldown.
+  lastRefreshAttemptAt = Date.now();
+  const failure = await requestRefresh(token);
+  if (failure) {
+    return {
+      ...failure,
+      diagnostics: { endpoint: OPENCODEX_QUOTA_ENDPOINT, tokenConfigured: true },
+    };
+  }
+  return fetchQuota();
+}
+
+/**
+ * Actively rebuild OpenCodex provider reports, then reread the passive pool.
+ *
+ * At most one active attempt runs at a time, and attempts are spaced by
+ * `OPENCODEX_REFRESH_COOLDOWN_MS` process-wide. A call while the cooldown holds
+ * returns the passive snapshot instead, so failures cannot cause a retry storm.
+ * `force` is reserved for an explicit user request: it bypasses the cooldown,
+ * still joins any attempt already in flight, and restarts the cooldown.
+ * Never throws; active failures stay safe and redacted.
+ */
+export async function refreshQuota(options: { force?: boolean } = {}): Promise<QuotaSnapshot> {
+  if (refreshInFlight) return refreshInFlight;
+  const force = options.force === true;
+  if (!force && Date.now() - lastRefreshAttemptAt < OPENCODEX_REFRESH_COOLDOWN_MS) {
+    return fetchQuota();
+  }
+
+  refreshInFlight = performRefresh();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = undefined;
+  }
 }

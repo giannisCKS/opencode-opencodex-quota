@@ -1,6 +1,8 @@
 /**
  * The quota RPC between this plugin's server half and the TUI. The server
- * registers it during setup; the TUI calls its single `snapshot` method.
+ * registers it during setup; the TUI calls `snapshot` for a passive read and
+ * `refresh` for an active provider-report rebuild. Only `refresh` accepts an
+ * explicit `force` flag; snapshot input stays empty.
  *
  * Imports from `@opencode/*` stay type-only, so loading this module loads no
  * OpenCode package.
@@ -13,8 +15,11 @@ export const QUOTA_RPC_ID = "opencodex.quota";
 type StandardValueSchema = Extract<Rpc.PortableValueSchema, { "~standard": unknown }>;
 type QuotaRpcSchema<T> = StandardValueSchema & { "~standard": { types?: { input: T; output: T } } };
 
-/** The `snapshot` input is empty: there is no refresh or reset-notice control. */
+/** The passive snapshot takes an empty input: no control is exposed. */
 export type QuotaSnapshotInput = Record<string, never>;
+
+/** The active refresh accepts only an optional explicit-refresh flag. */
+export type QuotaRefreshInput = { force?: boolean };
 
 /**
  * A Standard Schema that runs `check` and passes the value through unchanged.
@@ -104,23 +109,46 @@ function isSnapshot(value: unknown): value is QuotaSnapshot {
   );
 }
 
+/** An empty object (or an omitted input) is the only accepted passive request body. */
+const emptyInput = schema<QuotaSnapshotInput>((value) => {
+  if (value === undefined) return null;
+  if (!isObject(value)) return "input must be an object";
+  return Object.keys(value).length === 0 ? null : "input must be empty";
+});
+
+/** Only an optional boolean `force` is accepted for an active request. */
+const refreshInput = schema<QuotaRefreshInput>((value) => {
+  if (value === undefined) return null;
+  if (!isObject(value)) return "input must be an object";
+  if (Object.keys(value).some((key) => key !== "force")) {
+    return "input accepts only an optional force flag";
+  }
+  if (value.force !== undefined && typeof value.force !== "boolean") {
+    return "force must be a boolean";
+  }
+  return null;
+});
+
+const snapshotOutput = schema<QuotaSnapshot>((value) =>
+  isSnapshot(value) ? null : "output must be a valid quota snapshot",
+);
+
 /**
- * The single-method quota RPC. `snapshot` takes an empty input and returns the
- * current normalized OpenCodex pool reading.
+ * The quota RPC. `snapshot` reads the passive pool; `refresh` actively rebuilds
+ * provider reports and then rereads the passive pool. Automatic refreshes stay
+ * throttled server-side; only an explicit `force` bypasses the cooldown.
  */
 export const quotaRpc = {
   id: QUOTA_RPC_ID,
   events: {},
   methods: {
     snapshot: {
-      input: schema<QuotaSnapshotInput>((value) => {
-        if (value === undefined) return null;
-        if (!isObject(value)) return "input must be an object";
-        return Object.keys(value).length === 0 ? null : "input must be empty";
-      }),
-      output: schema<QuotaSnapshot>((value) =>
-        isSnapshot(value) ? null : "output must be a valid quota snapshot",
-      ),
+      input: emptyInput,
+      output: snapshotOutput,
+    },
+    refresh: {
+      input: refreshInput,
+      output: snapshotOutput,
     },
   },
 } satisfies Rpc.PortableDefinition;

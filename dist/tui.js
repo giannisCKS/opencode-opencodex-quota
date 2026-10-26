@@ -15,10 +15,12 @@ import { useTerminalDimensions } from "@opentui/solid";
 // OpenCode rewrites the bare "solid-js" specifier to the client runtime its
 // renderer uses. A dist/solid.js subpath is not rewritten, which loads a second
 // runtime whose components create elements without a renderer owner.
-import { createSignal, Show } from "solid-js";
+import { createSignal, onMount, Show } from "solid-js";
 import { quotaRpc } from "./rpc.js";
 const REFRESH_INTERVAL_MS = 60_000;
 const RPC_TIMEOUT_MS = 60_000;
+/** The backend's active rebuild (10s) plus its passive reread (10s). */
+const ACTIVE_REFRESH_TIMEOUT_MS = 20_000;
 const QUOTA_DIALOG_SIZE = "large";
 /** A reading older than this is marked stale in the sidebar and the dialog. */
 export const QUOTA_STALE_AFTER_MS = 5 * 60_000;
@@ -200,32 +202,8 @@ const POOLED_ONLY_PROVIDERS = new Set(["openai"]);
 function isPooledOnlyProvider(provider) {
   return POOLED_ONLY_PROVIDERS.has(provider.provider.trim().toLowerCase());
 }
-
-/**
- * Pooled-only providers keep account rows hidden while pooled windows exist. An
- * empty pool falls back to account quota, shown without account labels because
- * those can carry opaque identifiers. Other providers always show labelled
- * accounts. Returns undefined when the accounts stay hidden.
- */
-function accountDisplay(provider) {
-  if (!isPooledOnlyProvider(provider)) return "labelled";
-  if (provider.pooled.windows.length > 0) return undefined;
-  return provider.accounts.length > 0 ? "generic" : undefined;
-}
-
-/** A numbered account head for the fallback, so an opaque label stays hidden. */
-function numberedAccountHead(account, index) {
-  const name = `Account ${index + 1}`;
-  const plan = account.plan ? sanitize(account.plan) : undefined;
-  return plan ? `${name} (${plan})` : name;
-}
-function hasAccountWindows(provider) {
-  return provider.accounts.some(account => account.windows.length > 0);
-}
-
-/** An empty pool is only "not reported" when no account window supplies quota. */
-function emptyPoolLabel(provider) {
-  return hasAccountWindows(provider) ? "No pooled windows." : "Quota not reported yet.";
+function showsProviderAccounts(provider) {
+  return !isPooledOnlyProvider(provider);
 }
 
 /**
@@ -366,11 +344,29 @@ function renderSidebarEntries(entries) {
   }
   return rows;
 }
+
+/**
+ * When the displayed pool was observed: the oldest pooled-window observation,
+ * never fresher than the report generation that assembled it. A successful
+ * fetch time is not an observation time.
+ */
+function observedAgeMs(snapshot, now) {
+  let oldest;
+  const consider = value => {
+    const age = ageMs(value, now);
+    if (age !== undefined && (oldest === undefined || age > oldest)) oldest = age;
+  };
+  consider(snapshot.generatedAt);
+  for (const provider of snapshot.providers) {
+    for (const window of provider.pooled.windows) consider(window.observedAt);
+  }
+  return oldest;
+}
 function resolveReading(input) {
   const snapshot = input.snapshot;
   const error = input.failure ?? snapshot?.error;
   const providers = snapshot?.providers ?? [];
-  const age = ageMs(snapshot?.generatedAt, input.now) ?? (input.lastLoadedAt === undefined ? undefined : Math.max(0, input.now - input.lastLoadedAt));
+  const age = snapshot === undefined ? undefined : observedAgeMs(snapshot, input.now);
   return {
     snapshot,
     failure: input.failure,
@@ -380,7 +376,8 @@ function resolveReading(input) {
     age,
     stale: age !== undefined && age > QUOTA_STALE_AFTER_MS,
     loading: input.loading,
-    now: input.now
+    now: input.now,
+    retained: input.retained === true
   };
 }
 function pushErrors(rows, reading) {
@@ -404,13 +401,13 @@ export function quotaSidebarStatus(input) {
   if (reading.error) return "update failed";
   if (!reading.snapshot || reading.providers.length === 0) return undefined;
   if (reading.stale && reading.age !== undefined) return `stale ${formatDuration(reading.age)}`;
+  if (reading.age === undefined) return "observation unknown";
   return ageText(reading.age);
 }
 
 /**
- * Compact sidebar rows. OpenAI keeps pooled windows only while they exist; an
- * empty pool shows numbered account quota instead. Other providers keep
- * labelled accounts.
+ * Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep
+ * accounts. Missing pooled quota is never filled from account quota.
  */
 export function quotaSidebarRows(input) {
   const reading = resolveReading(input);
@@ -435,27 +432,28 @@ export function quotaSidebarRows(input) {
     kind: "line",
     row
   }));
+  if (reading.retained) {
+    pushSidebarLine(entries, "Last pooled report retained.", "muted");
+  }
   reading.providers.forEach(provider => {
     pushSidebarLine(entries, providerTitle(provider.provider), "title");
-    const display = accountDisplay(provider);
     if (provider.pooled.windows.length === 0) {
-      pushSidebarLine(entries, emptyPoolLabel(provider), "muted");
+      pushSidebarLine(entries, "No pooled quota reported.", "muted");
     }
     for (const window of provider.pooled.windows) {
       pushCompactWindow(entries, provider, window, reading.now, true);
     }
-    if (display) {
-      pushSidebarLine(entries, display === "generic" ? "Account quota" : "Accounts", "muted");
-      provider.accounts.forEach((account, index) => {
-        const head = display === "generic" ? numberedAccountHead(account, index) : accountHead(account);
-        pushSidebarLine(entries, `${head}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state));
+    if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
+      pushSidebarLine(entries, "Accounts", "muted");
+      for (const account of provider.accounts) {
+        pushSidebarLine(entries, `${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`, accountTone(account.state));
         if (account.windows.length === 0) {
           pushSidebarLine(entries, "Quota unknown.", "muted");
         }
         for (const window of account.windows) {
           pushCompactWindow(entries, provider, window, reading.now, false);
         }
-      });
+      }
     }
   });
   return renderSidebarEntries(entries);
@@ -479,10 +477,9 @@ function pushProvider(rows, provider, now) {
     text: providerTitle(provider.provider),
     tone: "title"
   });
-  const display = accountDisplay(provider);
   if (provider.pooled.windows.length === 0) {
     rows.push({
-      text: `  ${emptyPoolLabel(provider)}`,
+      text: "  No pooled quota reported.",
       tone: "muted"
     });
   }
@@ -502,15 +499,14 @@ function pushProvider(rows, provider, now) {
       tone: "muted"
     });
   }
-  if (display) {
+  if (showsProviderAccounts(provider) && provider.accounts.length > 0) {
     rows.push({
-      text: display === "generic" ? "Account quota" : "Accounts",
+      text: "Accounts",
       tone: "muted"
     });
-    provider.accounts.forEach((account, index) => {
-      const head = display === "generic" ? numberedAccountHead(account, index) : accountHead(account);
+    for (const account of provider.accounts) {
       rows.push({
-        text: `  ${head}: ${ACCOUNT_STATE_LABELS[account.state]}`,
+        text: `  ${accountHead(account)}: ${ACCOUNT_STATE_LABELS[account.state]}`,
         tone: accountTone(account.state)
       });
       if (account.windows.length === 0) {
@@ -522,7 +518,7 @@ function pushProvider(rows, provider, now) {
       for (const window of account.windows) {
         pushWindowDetail(rows, provider, window, now, 4, false);
       }
-    });
+    }
   }
 }
 
@@ -559,6 +555,12 @@ export function quotaDialogRows(input) {
     });
     return rows;
   }
+  if (reading.retained) {
+    rows.push({
+      text: "Last pooled report retained.",
+      tone: "muted"
+    });
+  }
   if (reading.failure) {
     rows.push({
       text: "Showing the last reading.",
@@ -588,7 +590,7 @@ export function quotaDialogSubtitle(input) {
     parts.push(`stale ${formatDuration(reading.age)}`);
   } else {
     const age = ageText(reading.age);
-    parts.push(age ? `updated ${age}` : "update time unknown");
+    parts.push(age ? `updated ${age}` : "observation unknown");
   }
   const count = reading.providers.length;
   if (count > 0) parts.push(`${count} provider${count === 1 ? "" : "s"}`);
@@ -615,9 +617,72 @@ function rpcErrorMessage(error) {
 }
 
 /**
+ * Keeps the last reported pooled windows for a provider when a newer successful
+ * report omits them or drops the provider. The reading is marked retained, and
+ * its age comes from the older report, so a stale pool never looks fresh.
+ */
+export function retainPooledWindows(previous, next) {
+  if (!previous || next.error) return {
+    snapshot: next,
+    retained: false
+  };
+  const prior = new Map(previous.providers.map(provider => [provider.provider, provider]));
+  let retained = false;
+  const providers = next.providers.map(provider => {
+    const older = prior.get(provider.provider);
+    if (!older || provider.pooled.windows.length > 0 || older.pooled.windows.length === 0) {
+      return provider;
+    }
+    retained = true;
+    return {
+      ...provider,
+      pooled: {
+        ...older.pooled
+      }
+    };
+  });
+  const reported = new Set(next.providers.map(provider => provider.provider));
+  for (const older of previous.providers) {
+    if (reported.has(older.provider) || older.pooled.windows.length === 0) continue;
+    retained = true;
+    // Only pool data survives; stale account states never come back.
+    providers.push({
+      provider: older.provider,
+      pooled: older.pooled,
+      accounts: []
+    });
+  }
+  if (!retained) return {
+    snapshot: next,
+    retained: false
+  };
+  return {
+    snapshot: {
+      ...next,
+      providers,
+      generatedAt: previous.generatedAt ?? next.generatedAt
+    },
+    retained: true
+  };
+}
+
+/**
+ * Ordering is data-only. An active request outranks every passive request that
+ * started before or during its flight; the generation breaks any other tie.
+ */
+
+function orderAfter(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return false;
+}
+
+/**
  * One snapshot store for the whole plugin. It polls slowly, collapses refreshes
  * that arrive during a load, keeps the last reading after a failure, and stops
- * its timer and in-flight request on disposal.
+ * its timer and in-flight requests on disposal. Active refreshes are separate:
+ * they never run on the poll, never overlap, and are dropped after their bound.
  */
 export function createQuotaStore(load, options = {}) {
   const now = options.now ?? Date.now;
@@ -627,12 +692,42 @@ export function createQuotaStore(load, options = {}) {
   const [failure, setFailure] = createSignal(undefined);
   const [loading, setLoading] = createSignal(true);
   const [lastLoadedAt, setLastLoadedAt] = createSignal(undefined);
+  const [retained, setRetained] = createSignal(false);
   let disposed = false;
   let inFlight = false;
   let queued = false;
   let active;
   let activeTimeout;
   let timer;
+
+  // Each request keeps a start generation. Data and failure are ordered
+  // separately: a newer failure blocks failures but never an older valid
+  // success, and a newer success clears an older failure.
+  let requestGeneration = 0;
+  let activeGeneration;
+  let dataOrder = [0, 0, 0];
+  let dataGeneration = 0;
+  let failureGeneration = 0;
+  const acceptSuccess = (order, generation, value) => {
+    const applied = orderAfter(order, dataOrder);
+    if (applied) {
+      dataOrder = order;
+      dataGeneration = generation;
+      applyReading(value);
+    }
+    if (generation > failureGeneration) setFailure(undefined);
+    return applied;
+  };
+  const acceptFailure = (generation, message) => {
+    if (generation <= failureGeneration || generation <= dataGeneration) return;
+    failureGeneration = generation;
+    setFailure(message);
+  };
+  const applyReading = value => {
+    const merged = retainPooledWindows(snapshot(), value);
+    setSnapshot(merged.snapshot);
+    setRetained(merged.retained);
+  };
   const refresh = () => {
     if (disposed) return;
     if (inFlight) {
@@ -641,6 +736,8 @@ export function createQuotaStore(load, options = {}) {
     }
     inFlight = true;
     setLoading(true);
+    const generation = ++requestGeneration;
+    const order = [activeGeneration ?? generation, 0, generation];
     const controller = new AbortController();
     active = controller;
     // One completion per request: the deadline below settles the store even when
@@ -667,7 +764,7 @@ export function createQuotaStore(load, options = {}) {
       // No immediate retry: a queued poll waits for the next interval, so a
       // permanently hanging loader cannot spin.
       queued = false;
-      complete(() => setFailure(rpcErrorMessage(timeoutError)));
+      complete(() => acceptFailure(generation, rpcErrorMessage(timeoutError)));
     }, requestTimeoutMs);
     activeTimeout = timeout;
     let request;
@@ -682,15 +779,65 @@ export function createQuotaStore(load, options = {}) {
         if (backendError) {
           // A backend-reported error is not a good reading. Keep the last good
           // snapshot, and expose the reason like a transport failure.
-          setFailure(backendError);
+          acceptFailure(generation, backendError);
           return;
         }
-        setSnapshot(value);
-        setFailure(undefined);
-        setLastLoadedAt(now());
+        if (acceptSuccess(order, generation, value)) setLastLoadedAt(now());
       });
     }).catch(error => {
-      complete(() => setFailure(rpcErrorMessage(error)));
+      complete(() => acceptFailure(generation, rpcErrorMessage(error)));
+    });
+  };
+  const activeRefresh = options.activeRefresh;
+  let activeInFlight = false;
+  let activeRequest;
+  let activeDeadline;
+  const refreshActive = (force = false) => {
+    if (disposed || activeInFlight || activeRefresh === undefined) return;
+    activeInFlight = true;
+    const generation = ++requestGeneration;
+    activeGeneration = generation;
+    const order = [generation, 1, generation];
+    const controller = new AbortController();
+    activeRequest = controller;
+    let settled = false;
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (activeDeadline === deadline) activeDeadline = undefined;
+      if (activeGeneration === generation) activeGeneration = undefined;
+      if (disposed) return;
+      activeRequest = undefined;
+      activeInFlight = false;
+    };
+    const deadline = setTimeout(() => {
+      const timeoutError = new DOMException("Quota refresh timed out", "TimeoutError");
+      controller.abort(timeoutError);
+      complete();
+      if (!disposed) acceptFailure(generation, rpcErrorMessage(timeoutError));
+    }, ACTIVE_REFRESH_TIMEOUT_MS);
+    activeDeadline = deadline;
+    let request;
+    try {
+      request = activeRefresh(controller.signal, force);
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    void request.then(value => {
+      if (settled || disposed) return;
+      complete();
+      const backendError = typeof value.error === "string" && value.error.length > 0 ? value.error : undefined;
+      if (backendError) {
+        // An active failure keeps the displayed data and reports the reason.
+        acceptFailure(generation, backendError);
+        return;
+      }
+      acceptSuccess(order, generation, value);
+    }).catch(error => {
+      if (settled || disposed) return;
+      complete();
+      acceptFailure(generation, rpcErrorMessage(error));
     });
   };
   refresh();
@@ -700,7 +847,9 @@ export function createQuotaStore(load, options = {}) {
     failure,
     loading,
     lastLoadedAt,
+    retained,
     refresh,
+    refreshActive,
     dispose: () => {
       disposed = true;
       if (timer !== undefined) clearInterval(timer);
@@ -708,6 +857,9 @@ export function createQuotaStore(load, options = {}) {
       if (activeTimeout !== undefined) clearTimeout(activeTimeout);
       activeTimeout = undefined;
       active?.abort();
+      if (activeDeadline !== undefined) clearTimeout(activeDeadline);
+      activeDeadline = undefined;
+      activeRequest?.abort();
     }
   };
 }
@@ -724,13 +876,25 @@ function loadSnapshot(context, signal) {
   const input = {};
   return context.client.rpc(quotaRpc).snapshot(input, quotaRpcOptions(context, signal));
 }
+function refreshSnapshot(context, signal, force = false) {
+  const input = force ? {
+    force: true
+  } : {};
+  return context.client.rpc(quotaRpc).refresh(input, quotaRpcOptions(context, signal));
+}
+
+/** A sidebar mount is a resume: ask for one active refresh, not a poll. */
+export function activateOnSidebarMount(store) {
+  onMount(() => store.refreshActive());
+}
 function QuotaSidebar(props) {
   const reading = () => ({
     snapshot: props.store.snapshot(),
     failure: props.store.failure(),
     loading: props.store.loading(),
     lastLoadedAt: props.store.lastLoadedAt(),
-    now: Date.now()
+    now: Date.now(),
+    retained: props.store.retained()
   });
   const status = () => quotaSidebarStatus(reading());
   const rows = () => quotaSidebarRows(reading());
@@ -792,7 +956,8 @@ function QuotaDialog(props) {
     failure: props.store.failure(),
     loading: props.store.loading(),
     lastLoadedAt: props.store.lastLoadedAt(),
-    now: Date.now()
+    now: Date.now(),
+    retained: props.store.retained()
   });
   const close = () => props.context.ui.dialog?.clear();
   let scroll;
@@ -931,11 +1096,11 @@ function QuotaDialog(props) {
   })();
 }
 
-/** Opens the quota dialog for the shared store and asks for one fresh reading. */
+/** Opens the quota dialog for the shared store and asks for one explicit refresh. */
 export function showQuotaDialog(context, store, size = QUOTA_DIALOG_SIZE) {
   const dialog = context.ui.dialog;
   if (!dialog) return;
-  store.refresh();
+  store.refreshActive(true);
   dialog.show(() => _$createComponent(QuotaDialog, {
     context: context,
     store: store
@@ -948,7 +1113,13 @@ const plugin = Plugin.define({
   id: "opencode-opencodex-quota",
   setup(context) {
     const api = context;
-    const store = createQuotaStore(signal => loadSnapshot(api, signal));
+    const store = createQuotaStore(signal => loadSnapshot(api, signal), {
+      activeRefresh: (signal, force) => refreshSnapshot(api, signal, force)
+    });
+    // Startup and resume ask once for an active collection; the backend cooldown
+    // and the store's single flight absorb repeats.
+    store.refreshActive();
+    const disposeStepEnded = api.data.on?.("session.step.ended", () => store.refreshActive());
     api.keymap?.layer(() => ({
       mode: "global",
       commands: [{
@@ -964,14 +1135,18 @@ const plugin = Plugin.define({
     }));
     const disposeSidebar = api.ui.slot({
       append: "sidebar.content",
-      render: () => _$createComponent(QuotaSidebar, {
-        store: store,
-        get theme() {
-          return api.theme;
-        }
-      })
+      render: () => {
+        activateOnSidebarMount(store);
+        return _$createComponent(QuotaSidebar, {
+          store: store,
+          get theme() {
+            return api.theme;
+          }
+        });
+      }
     });
     return () => {
+      disposeStepEnded?.();
       disposeSidebar();
       store.dispose();
     };

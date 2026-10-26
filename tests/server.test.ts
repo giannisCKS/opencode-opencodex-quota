@@ -8,6 +8,7 @@ import { OpenCodexQuotaPlugin, default as defaultExport } from "../src/index.ts"
 import { quotaRpc } from "../src/rpc.ts";
 
 const ENDPOINT = "http://127.0.0.1:10100/api/quota-pool";
+const REFRESH_ENDPOINT = "http://127.0.0.1:10100/api/provider-quotas?refresh=1";
 
 const PAYLOAD = {
   schema: "ocx.quota-pool/1",
@@ -104,7 +105,12 @@ beforeEach(() => {
     globalThis.fetch = original;
   };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    fetchCalls.push({ url: String(input), init });
+    const url = String(input);
+    fetchCalls.push({ url, init });
+    if (url === REFRESH_ENDPOINT) {
+      // The active response body is never parsed, so its content is irrelevant.
+      return new Response("not parsed", { status: 200 });
+    }
     return new Response(JSON.stringify(PAYLOAD), { status: 200 });
   }) as typeof fetch;
 });
@@ -120,7 +126,7 @@ async function validateSchema(schema: unknown, value: unknown) {
   return (await standard.validate(value)) as { issues?: unknown[] };
 }
 
-test("setup registers one quota RPC with a snapshot method and no other surfaces", async () => {
+test("setup registers one quota RPC with snapshot and refresh methods and no other surfaces", async () => {
   const { context, registered, calls } = fakeContext();
   await OpenCodexQuotaPlugin.setup(context as never);
 
@@ -128,8 +134,8 @@ test("setup registers one quota RPC with a snapshot method and no other surfaces
   assert.equal(registered.length, 1);
   assert.equal(registered[0]?.definition, quotaRpc);
   assert.equal(registered[0]?.definition.id, "opencodex.quota");
-  assert.deepEqual(Object.keys(registered[0]?.definition.methods ?? {}), ["snapshot"]);
-  assert.deepEqual(Object.keys(registered[0]?.handlers ?? {}), ["snapshot"]);
+  assert.deepEqual(Object.keys(registered[0]?.definition.methods ?? {}), ["snapshot", "refresh"]);
+  assert.deepEqual(Object.keys(registered[0]?.handlers ?? {}), ["snapshot", "refresh"]);
   assert.deepEqual(calls, { command: 0, hook: 0, prompt: 0 }, "the server installs no commands or hooks");
 });
 
@@ -166,16 +172,93 @@ test("the snapshot handler reads the passive pool and returns the normalized sna
   assert.deepEqual(fetchCalls[0]?.init?.headers, { Authorization: "Bearer test-token" });
 });
 
+test("the refresh handler actively rebuilds provider reports, then rereads the passive pool", async () => {
+  const { context, registered } = fakeContext();
+  await OpenCodexQuotaPlugin.setup(context as never);
+
+  const snapshot = await registered[0]?.handlers.refresh?.();
+  assert.equal((snapshot as { generatedAt?: string }).generatedAt, "2026-10-24T10:00:05.000Z");
+
+  assert.equal(fetchCalls.length, 2, "one active request and one passive read");
+  assert.equal(fetchCalls[0]?.url, REFRESH_ENDPOINT);
+  assert.equal(fetchCalls[0]?.init?.method, undefined, "the active call is a GET");
+  assert.equal(fetchCalls[0]?.init?.redirect, "error");
+  assert.ok(fetchCalls[0]?.init?.signal, "the active call is bounded by a timeout signal");
+  assert.deepEqual(fetchCalls[0]?.init?.headers, { Authorization: "Bearer test-token" });
+
+  assert.equal(fetchCalls[1]?.url, ENDPOINT);
+  assert.equal(fetchCalls[1]?.init?.redirect, "error");
+});
+
+test("the refresh handler honors only an explicit force flag", async () => {
+  const { context, registered } = fakeContext();
+  await OpenCodexQuotaPlugin.setup(context as never);
+
+  const forced = await registered[0]?.handlers.refresh?.({ force: true });
+  assert.equal((forced as { generatedAt?: string }).generatedAt, "2026-10-24T10:00:05.000Z");
+  assert.deepEqual(
+    fetchCalls.map((call) => call.url),
+    [REFRESH_ENDPOINT, ENDPOINT],
+    "an explicit request rebuilds even without a warm cooldown",
+  );
+
+  await registered[0]?.handlers.refresh?.({});
+  assert.deepEqual(
+    fetchCalls.map((call) => call.url),
+    [REFRESH_ENDPOINT, ENDPOINT, ENDPOINT],
+    "an automatic request stays throttled",
+  );
+
+  await registered[0]?.handlers.refresh?.({ force: false });
+  assert.deepEqual(
+    fetchCalls.map((call) => call.url),
+    [REFRESH_ENDPOINT, ENDPOINT, ENDPOINT, ENDPOINT],
+    "force false stays throttled",
+  );
+
+  await registered[0]?.handlers.refresh?.({ force: true });
+  assert.deepEqual(
+    fetchCalls.map((call) => call.url),
+    [REFRESH_ENDPOINT, ENDPOINT, ENDPOINT, ENDPOINT, REFRESH_ENDPOINT, ENDPOINT],
+    "a later explicit request bypasses the cooldown again",
+  );
+});
+
+test("the snapshot handler stays passive and never calls the refresh endpoint", async () => {
+  const { context, registered } = fakeContext();
+  await OpenCodexQuotaPlugin.setup(context as never);
+
+  await registered[0]?.handlers.snapshot();
+  assert.deepEqual(
+    fetchCalls.map((call) => call.url),
+    [ENDPOINT],
+  );
+});
+
 test("the registered snapshot handler satisfies the RPC wire schema the TUI calls", async () => {
   const { context, registered } = fakeContext();
   await OpenCodexQuotaPlugin.setup(context as never);
 
   const definition = registered[0]?.definition as unknown as {
-    methods: { snapshot: { input: unknown; output: unknown } };
+    methods: { snapshot: { input: unknown; output: unknown }; refresh: { input: unknown; output: unknown } };
   };
 
   const input = await validateSchema(definition.methods.snapshot.input, {});
   assert.equal(input.issues, undefined, "the empty-object input the TUI sends is accepted");
+
+  const refreshInput = await validateSchema(definition.methods.refresh.input, {});
+  assert.equal(refreshInput.issues, undefined, "the automatic refresh input is accepted");
+  const forcedInput = await validateSchema(definition.methods.refresh.input, { force: true });
+  assert.equal(forcedInput.issues, undefined, "the explicit refresh input is accepted");
+  const badForce = await validateSchema(definition.methods.refresh.input, { force: "yes" });
+  assert.notEqual(badForce.issues, undefined, "a non-boolean force is rejected");
+  const extraInput = await validateSchema(definition.methods.refresh.input, {
+    force: true,
+    extra: true,
+  });
+  assert.notEqual(extraInput.issues, undefined, "unknown inputs are rejected");
+  const snapshotForce = await validateSchema(definition.methods.snapshot.input, { force: true });
+  assert.notEqual(snapshotForce.issues, undefined, "the passive input stays empty");
 
   const snapshot = await registered[0]?.handlers.snapshot();
   const output = await validateSchema(definition.methods.snapshot.output, snapshot);

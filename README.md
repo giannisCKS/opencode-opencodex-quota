@@ -4,15 +4,16 @@ A local OpenCode V2 plugin for the OpenCodex passive quota pool. It provides a q
 
 ## Scope
 
-- One fixed endpoint: `GET http://127.0.0.1:10100/api/quota-pool`.
+- Two fixed endpoints: `GET http://127.0.0.1:10100/api/quota-pool` for passive reads, and `GET http://127.0.0.1:10100/api/provider-quotas?refresh=1` for the active rebuild.
 - One supported wire schema: `ocx.quota-pool/1`, introduced by [OpenCodex #7476](https://github.com/lidge-jun/opencodex/pull/7476).
-- Cached quota only. Reading this endpoint does not probe providers or refresh upstream quota.
-- The sidebar reads every 60 seconds. `/quota` opens a scrollable dialog and requests another passive reading.
+- The passive read uses the cached quota pool. It never probes providers or refreshes upstream quota itself.
+- The sidebar shows the last passive reading immediately, repeats the passive read every 60 seconds, and asks for one active refresh on startup, sidebar mount, and after a completed session step. An active refresh asks OpenCodex to rebuild provider reports for every configured provider, then rereads the passive pool. The backend spaces automatic attempts by a five-minute cooldown shared across the process, including failed attempts, and runs one at a time; the plugin also never overlaps active calls, and a poll never triggers one. `/quota` opens a scrollable dialog and sends an explicit refresh that bypasses that cooldown; it still joins any active request already in flight. Only that command bypasses the cooldown: startup, mount, session, and poll requests stay automatic and throttled. Results follow request start, with an active success taking priority over a passive read that started before or during it; a later passive read can replace it, a failure never hides valid older data, and only a newer success clears an error.
 - Provider pools and accounts come from OpenCodex. This plugin does not authenticate with individual providers.
+- A successful report that omits a provider's pooled windows retains the last reported windows instead. The reading is marked retained and keeps the older report's age, so it never looks fresher than it is. No values are invented.
 - Missing quota remains unknown, never zero. Unknown values have no bar.
 - Known percentages show a compact thin bar and a numeric remaining label. Sidebar window rows share one label, bar, percentage, and reset column across providers. Reset countdowns and model scope stay visible, and exhausted windows stay marked.
 - Sidebar resets count down in minutes under one hour, hours under one day, and whole days otherwise. Five-hour windows show hours and minutes (`4h 12m`), and drop zero minutes (`4h`). OpenAI pooled rows prefer the pooled reset; if absent, they show the duration from the earliest future matching available or exhausted account window, or `?d` when unknown. Paused, sign-in-required, and unknown accounts are skipped. This is a next contributing account reset, not a guaranteed pool reset. Account rows use only their own reset date; without one they show `?d`, never another account's reset.
-- The OpenAI provider shows pooled windows only while the pool reports them. If the pool is empty, it shows numbered account quota, labelled as account quota rather than pooled quota, and keeps account labels hidden. Other providers keep account states and account windows. An empty pool with no account quota says the quota was not reported yet, never that it is exhausted. Any pool reset stays labelled as the pool's when the pool is empty.
+- The OpenAI provider shows pooled quota only: its account rows stay hidden whether or not pooled windows are reported. An empty pool reads as unreported, never as zero or a pool estimated from account quota, and any pool reset stays labelled as the pool's. Other providers keep account states and account windows.
 - No accounting, pricing, reset notifications, reference-plugin formatting, configuration module, or extra dependencies.
 
 This replaces the previous adaptation of `@slkiser/opencode-quota`. Its report format and `/quota_status` command are no longer included.
@@ -31,7 +32,7 @@ The server resolves the management admin token in this order:
 2. The file named by `OPENCODEX_ADMIN_TOKEN_FILE`.
 3. `$OPENCODEX_HOME/admin-api-token`, defaulting to `~/.opencodex/admin-api-token`.
 
-The admin token is not a provider key or data-plane API key. It is sent only as a Bearer header to the fixed loopback endpoint. It is never included in the quota snapshot or UI. Redirects are rejected, requests time out after 10 seconds, and responses are capped at 1 MB. The plugin does not call the legacy `/api/provider-quotas` endpoint or request active refresh.
+The admin token is not a provider key or data-plane API key. It is sent only as a Bearer header to the two fixed loopback endpoints. It is never included in the quota snapshot or UI. Redirects are rejected, each passive HTTP request times out after 10 seconds, an active refresh is bounded at 20 seconds, and responses are capped at 1 MB. The active path only asks OpenCodex to rebuild its provider reports across every configured provider; OpenCodex performs all provider network activity. A failed automatic attempt holds the same five-minute cooldown, so failures are not retried early, and an active failure returns a safe error without replacing the last reading. An explicit `/quota` refresh bypasses the cooldown and restarts it, so a later failure or success is again throttled for five minutes.
 
 Missing credentials, HTTP errors, unsupported schemas, and malformed data produce an unavailable state. Raw response bodies and network error details are not displayed.
 
@@ -97,10 +98,10 @@ npm run validate
 
 `npm run validate` runs typechecking, build, and tests in order. Package tests inspect built artifacts, so build before running `npm test` independently.
 
-- `src/quota.ts`: bounded passive fetch, credential resolution, wire validation, and normalized display types.
-- `src/rpc.ts`: the single snapshot RPC shared by server and TUI.
-- `src/index.ts`: server-side RPC registration only.
-- `src/tui.tsx`: sidebar, command dialog, and polling lifecycle.
+- `src/quota.ts`: bounded passive fetch, throttled active rebuild with an explicit bypass, credential resolution, wire validation, and normalized display types.
+- `src/rpc.ts`: the snapshot and refresh RPCs shared by server and TUI; only refresh accepts an optional boolean `force`.
+- `src/index.ts`: server-side RPC registration for both methods.
+- `src/tui.tsx`: sidebar, command dialog, passive polling, and active refresh triggers.
 - `index.js`, `tui.ts`: directory-loader entries pointing to built output.
 
 Tests use fixtures and mocked transport. They do not require a running OpenCodex instance or real credentials.

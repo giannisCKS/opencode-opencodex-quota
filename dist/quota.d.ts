@@ -1,6 +1,10 @@
 /** Fixed local OpenCodex quota-pool endpoint. Never configurable by callers. */
 export declare const OPENCODEX_QUOTA_ENDPOINT = "http://127.0.0.1:10100/api/quota-pool";
-/** Request timeout for the local management call. */
+/** Fixed local OpenCodex provider-report rebuild endpoint. Never configurable. */
+export declare const OPENCODEX_REFRESH_ENDPOINT = "http://127.0.0.1:10100/api/provider-quotas?refresh=1";
+/** Minimum gap between active refresh attempts, successful or failed. */
+export declare const OPENCODEX_REFRESH_COOLDOWN_MS: number;
+/** Request timeout for the local management calls. */
 export declare const OPENCODEX_QUOTA_TIMEOUT_MS = 10000;
 export type QuotaWindowKind = "burst_5h" | "daily" | "weekly" | "monthly" | "credits" | "custom";
 /** How the reading was obtained upstream: probe body, rate-limit headers, or estimate. */
@@ -88,5 +92,18 @@ export declare function parseQuotaPool(payload: unknown): SnapshotBody;
  * token is read once per call and attached only as a boolean in `diagnostics`.
  */
 export declare function fetchQuota(): Promise<QuotaSnapshot>;
+/**
+ * Actively rebuild OpenCodex provider reports, then reread the passive pool.
+ *
+ * At most one active attempt runs at a time, and attempts are spaced by
+ * `OPENCODEX_REFRESH_COOLDOWN_MS` process-wide. A call while the cooldown holds
+ * returns the passive snapshot instead, so failures cannot cause a retry storm.
+ * `force` is reserved for an explicit user request: it bypasses the cooldown,
+ * still joins any attempt already in flight, and restarts the cooldown.
+ * Never throws; active failures stay safe and redacted.
+ */
+export declare function refreshQuota(options?: {
+    force?: boolean;
+}): Promise<QuotaSnapshot>;
 export {};
 //# sourceMappingURL=quota.d.ts.map

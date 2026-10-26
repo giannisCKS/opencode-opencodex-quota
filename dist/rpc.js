@@ -102,23 +102,45 @@ function isSnapshot(value) {
         typeof diagnostics.endpoint === "string" &&
         typeof diagnostics.tokenConfigured === "boolean");
 }
+/** An empty object (or an omitted input) is the only accepted passive request body. */
+const emptyInput = schema((value) => {
+    if (value === undefined)
+        return null;
+    if (!isObject(value))
+        return "input must be an object";
+    return Object.keys(value).length === 0 ? null : "input must be empty";
+});
+/** Only an optional boolean `force` is accepted for an active request. */
+const refreshInput = schema((value) => {
+    if (value === undefined)
+        return null;
+    if (!isObject(value))
+        return "input must be an object";
+    if (Object.keys(value).some((key) => key !== "force")) {
+        return "input accepts only an optional force flag";
+    }
+    if (value.force !== undefined && typeof value.force !== "boolean") {
+        return "force must be a boolean";
+    }
+    return null;
+});
+const snapshotOutput = schema((value) => isSnapshot(value) ? null : "output must be a valid quota snapshot");
 /**
- * The single-method quota RPC. `snapshot` takes an empty input and returns the
- * current normalized OpenCodex pool reading.
+ * The quota RPC. `snapshot` reads the passive pool; `refresh` actively rebuilds
+ * provider reports and then rereads the passive pool. Automatic refreshes stay
+ * throttled server-side; only an explicit `force` bypasses the cooldown.
  */
 export const quotaRpc = {
     id: QUOTA_RPC_ID,
     events: {},
     methods: {
         snapshot: {
-            input: schema((value) => {
-                if (value === undefined)
-                    return null;
-                if (!isObject(value))
-                    return "input must be an object";
-                return Object.keys(value).length === 0 ? null : "input must be empty";
-            }),
-            output: schema((value) => isSnapshot(value) ? null : "output must be a valid quota snapshot"),
+            input: emptyInput,
+            output: snapshotOutput,
+        },
+        refresh: {
+            input: refreshInput,
+            output: snapshotOutput,
         },
     },
 };

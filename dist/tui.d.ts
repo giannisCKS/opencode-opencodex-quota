@@ -3,7 +3,7 @@ import { Plugin } from "@opencode/plugin/tui";
 import { type RGBA } from "@opentui/core";
 import { type JSX } from "@opentui/solid";
 import type { QuotaSnapshot, QuotaWindow } from "./quota.js";
-import { type QuotaSnapshotInput } from "./rpc.js";
+import { type QuotaRefreshInput, type QuotaSnapshotInput } from "./rpc.js";
 /** A reading older than this is marked stale in the sidebar and the dialog. */
 export declare const QUOTA_STALE_AFTER_MS: number;
 /** The sidebar's width, and the width its quota text is laid out to. */
@@ -65,6 +65,12 @@ type TuiContext = {
                 };
                 signal: AbortSignal;
             }) => Promise<QuotaSnapshot>;
+            refresh: (input: QuotaRefreshInput, options: {
+                location: {
+                    directory: string;
+                };
+                signal: AbortSignal;
+            }) => Promise<QuotaSnapshot>;
         };
     };
     theme: TuiTheme;
@@ -77,6 +83,7 @@ type TuiContext = {
                 directory: string;
             };
         };
+        on?: (type: string, handler: () => void) => () => void;
     };
     ui: {
         slot: (claim: {
@@ -94,18 +101,24 @@ type TuiContext = {
         };
     };
 };
-export type QuotaLoader = (signal: AbortSignal) => Promise<QuotaSnapshot>;
+export type QuotaLoader = (signal: AbortSignal, force?: boolean) => Promise<QuotaSnapshot>;
 export type QuotaStoreOptions = {
     pollIntervalMs?: number;
     requestTimeoutMs?: number;
     now?: () => number;
+    /** An active refresh. It is only called by `refreshActive`, never by the poll. */
+    activeRefresh?: QuotaLoader;
 };
 export type QuotaStore = {
     snapshot: () => QuotaSnapshot | undefined;
     failure: () => string | undefined;
     loading: () => boolean;
     lastLoadedAt: () => number | undefined;
+    /** Whether displayed pooled windows came from an earlier report. */
+    retained: () => boolean;
     refresh: () => void;
+    /** `force` is only set by an explicit user command, never by a poll or event. */
+    refreshActive: (force?: boolean) => void;
     dispose: () => void;
 };
 export type QuotaTone = "title" | "text" | "muted" | "warning";
@@ -119,6 +132,8 @@ export type QuotaReading = {
     loading: boolean;
     lastLoadedAt?: number;
     now: number;
+    /** Displayed pooled windows were retained from an earlier report. */
+    retained?: boolean;
 };
 /** Compact duration: 42s, 7m, 3h, 2d. */
 export declare function formatDuration(value: number): string;
@@ -145,9 +160,8 @@ export declare function remainingBar(window: QuotaWindow, width?: number): strin
 /** The sidebar's one-line status. A null status means the rows carry the state. */
 export declare function quotaSidebarStatus(input: QuotaReading): string | undefined;
 /**
- * Compact sidebar rows. OpenAI keeps pooled windows only while they exist; an
- * empty pool shows numbered account quota instead. Other providers keep
- * labelled accounts.
+ * Compact sidebar rows. OpenAI keeps pooled windows only; other providers keep
+ * accounts. Missing pooled quota is never filled from account quota.
  */
 export declare function quotaSidebarRows(input: QuotaReading): QuotaRow[];
 /** The full, scrollable dialog rows. No model request is made to build them. */
@@ -155,12 +169,24 @@ export declare function quotaDialogRows(input: QuotaReading): QuotaRow[];
 /** The dialog subtitle: the pool's age, error state, and provider count. */
 export declare function quotaDialogSubtitle(input: QuotaReading): string;
 /**
+ * Keeps the last reported pooled windows for a provider when a newer successful
+ * report omits them or drops the provider. The reading is marked retained, and
+ * its age comes from the older report, so a stale pool never looks fresh.
+ */
+export declare function retainPooledWindows(previous: QuotaSnapshot | undefined, next: QuotaSnapshot): {
+    snapshot: QuotaSnapshot;
+    retained: boolean;
+};
+/**
  * One snapshot store for the whole plugin. It polls slowly, collapses refreshes
  * that arrive during a load, keeps the last reading after a failure, and stops
- * its timer and in-flight request on disposal.
+ * its timer and in-flight requests on disposal. Active refreshes are separate:
+ * they never run on the poll, never overlap, and are dropped after their bound.
  */
 export declare function createQuotaStore(load: QuotaLoader, options?: QuotaStoreOptions): QuotaStore;
-/** Opens the quota dialog for the shared store and asks for one fresh reading. */
+/** A sidebar mount is a resume: ask for one active refresh, not a poll. */
+export declare function activateOnSidebarMount(store: QuotaStore): void;
+/** Opens the quota dialog for the shared store and asks for one explicit refresh. */
 export declare function showQuotaDialog(context: TuiContext, store: QuotaStore, size?: DialogSize): void;
 declare const plugin: Plugin.Definition;
 export default plugin;

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createRoot } from "solid-js";
+
 import plugin, {
+  activateOnSidebarMount,
   ageLabel,
   createQuotaStore,
   formatCountdown,
@@ -17,6 +20,7 @@ import plugin, {
   TUI_SIDEBAR_MAX_WIDTH,
   type QuotaReading,
   type QuotaRow,
+  type QuotaStore,
 } from "../src/tui.tsx";
 import type { QuotaAccount, QuotaSnapshot, QuotaWindow } from "../src/quota.ts";
 import { quotaRpc } from "../src/rpc.ts";
@@ -540,7 +544,7 @@ test("sidebar keeps every provider, pooled window, account, and model scope", ()
   assert.ok(all.includes("Credits ▱▱▱▱▱▱▱▱▱▱ 0% ?d exhausted"));
   assert.ok(all.includes("Team (Pro): exhausted"));
   assert.ok(all.includes("Personal: available"));
-  assert.ok(all.includes("Quota not reported yet."), "an empty pool with no window reads as unreported");
+  assert.ok(all.includes("No pooled quota reported."), "an empty pool reads as unreported");
   assert.ok(all.includes("Spare: paused"));
   assert.ok(all.includes("Old: sign-in required"));
   assert.ok(all.includes("Mystery: unknown"));
@@ -682,7 +686,7 @@ test("a long window label wraps without dropping quota or model scope", () => {
 test("account windows stay visible when pooled windows are empty", () => {
   const value = reading({ snapshot: ACCOUNT_ONLY });
   const sidebar = joined(quotaSidebarRows(value));
-  assert.ok(sidebar.includes("No pooled windows."));
+  assert.ok(sidebar.includes("No pooled quota reported."));
   assert.ok(sidebar.includes("Shared: available"));
   assert.ok(sidebar.includes("Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 3h"));
   assert.ok(sidebar.includes("3h"));
@@ -699,7 +703,7 @@ test("account windows stay visible when pooled windows are empty", () => {
   assert.ok(!/(?:^|\s)0% left/.test(dialog));
 });
 
-test("an empty OpenAI pool falls back to clearly labelled account quota", () => {
+test("an empty OpenAI pool hides account quota in the sidebar and dialog", () => {
   const snapshot: QuotaSnapshot = {
     ...SNAPSHOT,
     providers: [
@@ -711,10 +715,7 @@ test("an empty OpenAI pool falls back to clearly labelled account quota", () => 
             label: "main/p56d532",
             plan: "Pro",
             state: "available",
-            windows: [
-              window({ usedPercent: 30, scopeModel: "gpt-5.2", resetsAt: at(3 * HOUR) }),
-              window({ kind: "daily", label: "Daily" }),
-            ],
+            windows: [window({ usedPercent: 30, scopeModel: "gpt-5.2", resetsAt: at(3 * HOUR) })],
           },
           { label: "second/opaque-7f3", state: "paused", windows: [] },
         ],
@@ -725,83 +726,38 @@ test("an empty OpenAI pool falls back to clearly labelled account quota", () => 
 
   const sidebarRows = quotaSidebarRows(value);
   const sidebar = joined(sidebarRows);
-  assert.ok(sidebar.includes("No pooled windows."));
-  assert.ok(sidebar.includes("Account quota"), "the fallback is labelled as account quota");
-  assert.ok(!sidebar.includes("Accounts"), "the pooled heading is not reused");
-  assert.ok(sidebar.includes("Account 1 (Pro): available"));
-  assert.ok(sidebar.includes("Account 2: paused"));
-  assert.ok(sidebar.includes("Weekly (gpt-5.2) ▰▰▰▰▰▰▰▱▱▱ 70% 3h"));
-  assert.ok(sidebar.includes("Daily unknown ?d"), "an unknown account percentage stays unknown");
-  assert.equal(
-    sidebarRows.filter((row) => /[▰▱]/u.test(row.text)).length,
-    1,
-    "only the reported account percentage draws a bar",
+  assert.ok(
+    sidebar.includes("No pooled quota reported."),
+    "missing pooled quota reads as unreported",
   );
-  assert.ok(!sidebar.includes("main/p56d532"), "an opaque account label stays hidden");
-  assert.ok(!sidebar.includes("second/opaque-7f3"), "an opaque account label stays hidden");
-  assert.ok(!/(?:^|\s)0% left/.test(sidebar));
-
-  const dialog = joined(quotaDialogRows(value));
-  assert.ok(dialog.includes("No pooled windows."));
-  assert.ok(dialog.includes("Account quota"));
-  assert.ok(dialog.includes("Account 1 (Pro): available"));
-  assert.ok(dialog.includes("Account 2: paused"));
-  assert.ok(dialog.includes("Weekly (gpt-5.2): 70% left"));
-  assert.ok(dialog.includes("Daily: remaining unknown"));
-  assert.ok(!dialog.includes("main/p56d532"), "an opaque account label stays hidden in the dialog");
-  assert.ok(!dialog.includes("second/opaque-7f3"));
-  assert.ok(!/(?:^|\s)0% left/.test(dialog));
-});
-
-test("an empty OpenAI pool without account quota reads as not reported", () => {
-  const noAccounts: QuotaSnapshot = {
-    ...SNAPSHOT,
-    providers: [{ provider: "openai", pooled: { windows: [] }, accounts: [] }],
-  };
-  const sidebar = joined(quotaSidebarRows(reading({ snapshot: noAccounts })));
-  assert.ok(sidebar.includes("Quota not reported yet."));
-  assert.ok(!sidebar.includes("No pooled windows."));
+  assert.deepEqual(textOf(sidebarRows), ["open-ai", "No pooled quota reported."]);
+  assert.ok(!sidebar.includes("Account"), "no account heading or account row");
+  assert.ok(!sidebar.includes("main/p56d532"), "account labels stay hidden");
+  assert.ok(!sidebar.includes("second/opaque-7f3"), "account data stays hidden");
+  assert.ok(!sidebar.includes("70%"), "account quota is not presented as pooled");
+  assert.ok(!/%/u.test(sidebar), "no percentage is invented");
+  assert.ok(!/[▰▱]/u.test(sidebar), "no bar for an unreported pool");
   assert.ok(!sidebar.includes("exhausted"), "missing quota is not exhaustion");
-  assert.ok(!sidebar.includes("%"), "no percentage is invented");
 
-  const dialog = joined(quotaDialogRows(reading({ snapshot: noAccounts })));
-  assert.ok(dialog.includes("Quota not reported yet."));
+  const dialogRows = quotaDialogRows(value);
+  const dialog = joined(dialogRows);
+  assert.ok(dialog.includes("No pooled quota reported."));
+  assert.deepEqual(textOf(dialogRows), ["open-ai", "  No pooled quota reported."]);
+  assert.ok(!dialog.includes("Account"), "no account heading or account row in the dialog");
+  assert.ok(!dialog.includes("main/p56d532"), "account labels stay hidden in the dialog");
+  assert.ok(!dialog.includes("second/opaque-7f3"), "account data stays hidden in the dialog");
+  assert.ok(!dialog.includes("70% left"), "account quota is not presented as pooled");
+  assert.ok(!/%/u.test(dialog), "no percentage is invented in the dialog");
+  assert.ok(!/[▰▱]/u.test(dialog), "no bar for an unreported pool");
   assert.ok(!dialog.includes("exhausted"), "missing quota is not exhaustion in the dialog");
-  assert.ok(!dialog.includes("%"), "no percentage is invented in the dialog");
-
-  const noWindows: QuotaSnapshot = {
-    ...SNAPSHOT,
-    providers: [
-      {
-        provider: "openai",
-        pooled: { windows: [] },
-        accounts: [{ label: "main/p56d532", state: "reauth", windows: [] }],
-      },
-    ],
-  };
-  const emptySidebarRows = quotaSidebarRows(reading({ snapshot: noWindows }));
-  const emptySidebar = joined(emptySidebarRows);
-  assert.ok(emptySidebar.includes("Quota not reported yet."));
-  assert.ok(emptySidebar.includes("Account 1: sign-in required"));
-  assert.ok(emptySidebar.includes("Quota unknown."));
-  assert.ok(!emptySidebar.includes("exhausted"));
-  assert.ok(!/[▰▱]/u.test(emptySidebar), "no bar without a reported percentage");
-  for (const row of emptySidebarRows) {
-    assert.ok(row.text.length <= TUI_SIDEBAR_MAX_WIDTH, `too wide: ${row.text}`);
-  }
-
-  const emptyDialog = joined(quotaDialogRows(reading({ snapshot: noWindows })));
-  assert.ok(emptyDialog.includes("Quota not reported yet."));
-  assert.ok(emptyDialog.includes("Account 1: sign-in required"));
-  assert.ok(!emptyDialog.includes("exhausted"));
 });
 
-test("an account quota row never borrows another account reset", () => {
+test("a non-OpenAI account row never borrows another account reset", () => {
   const snapshot: QuotaSnapshot = {
     ...SNAPSHOT,
     providers: [
       {
-        provider: "openai",
+        provider: "opencode-go",
         pooled: { windows: [] },
         accounts: [
           {
@@ -844,7 +800,7 @@ test("an empty pool reset stays pool metadata, never an account reset", () => {
     ...SNAPSHOT,
     providers: [
       {
-        provider: "openai",
+        provider: "opencode-go",
         pooled: { windows: [], nextResetAt: at(2 * HOUR) },
         accounts: [
           {
@@ -897,7 +853,7 @@ test("an empty pool reset stays pool metadata, never an account reset", () => {
 });
 
 test("sidebar status distinguishes fresh, stale, loading, unavailable, and empty", () => {
-  assert.equal(quotaSidebarStatus(reading()), "2m ago");
+  assert.equal(quotaSidebarStatus(reading()), "3m ago", "the oldest pooled observation wins");
 
   const staleSnapshot = { ...SNAPSHOT, generatedAt: at(-(QUOTA_STALE_AFTER_MS + MINUTE)) };
   assert.equal(quotaSidebarStatus(reading({ snapshot: staleSnapshot })), "stale 6m");
@@ -949,14 +905,14 @@ test("dialog shows pooled and account quota, reset, observation, and source", ()
   assert.ok(text.includes("  Team (Pro): exhausted"));
   assert.ok(text.includes("  Personal: available"));
   assert.ok(all.includes("Weekly (gpt-5.2): 80% left"));
-  assert.ok(all.includes("Quota not reported yet."));
+  assert.ok(all.includes("No pooled quota reported."));
   assert.ok(text.includes("  Spare: paused"));
   assert.ok(text.includes("  Old: sign-in required"));
   assert.ok(text.includes("  Mystery: unknown"));
 });
 
 test("dialog subtitle reports age, staleness, errors, and provider count", () => {
-  assert.equal(quotaDialogSubtitle(reading()), "Cached quota | updated 2m ago | 2 providers");
+  assert.equal(quotaDialogSubtitle(reading()), "Cached quota | updated 3m ago | 2 providers");
 
   const staleSnapshot = { ...SNAPSHOT, generatedAt: at(-(QUOTA_STALE_AFTER_MS + MINUTE)) };
   assert.equal(
@@ -971,6 +927,32 @@ test("dialog subtitle reports age, staleness, errors, and provider count", () =>
     quotaDialogSubtitle(reading({ snapshot: undefined, loading: true })),
     "Loading cached quota",
   );
+});
+
+test("summary age is the oldest pooled observation, never the fetch time", () => {
+  const snapshot: QuotaSnapshot = {
+    ...SNAPSHOT,
+    generatedAt: at(-MINUTE),
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [window({ usedPercent: 20, observedAt: at(-3 * HOUR) })] },
+        accounts: [],
+      },
+    ],
+  };
+  const value = reading({ snapshot, lastLoadedAt: NOW, now: NOW });
+  assert.equal(quotaSidebarStatus(value), "stale 3h", "a fresh report with old windows is stale");
+  assert.equal(quotaDialogSubtitle(value), "Cached quota | stale 3h | 1 provider");
+
+  const unknown: QuotaSnapshot = {
+    ...SNAPSHOT,
+    generatedAt: undefined,
+    providers: [{ provider: "openai", pooled: { windows: [] }, accounts: [] }],
+  };
+  const unknownReading = reading({ snapshot: unknown, lastLoadedAt: NOW, now: NOW });
+  assert.equal(quotaSidebarStatus(unknownReading), "observation unknown", "no timestamp is unknown");
+  assert.equal(quotaDialogSubtitle(unknownReading), "Cached quota | observation unknown | 1 provider");
 });
 
 test("dialog handles loading, errors, last known data, and an empty pool", () => {
@@ -1283,6 +1265,465 @@ test("store disposal clears the deadline timer and ignores a late result", async
   assert.equal(store.failure(), undefined);
 });
 
+test("the passive poll never triggers an active refresh", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  let activeCalls = 0;
+  const store = createQuotaStore(async () => SNAPSHOT, {
+    pollIntervalMs: 60_000,
+    activeRefresh: async () => {
+      activeCalls += 1;
+      return SNAPSHOT;
+    },
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  await settle();
+  t.mock.timers.tick(60_000);
+  await settle();
+  t.mock.timers.tick(60_000);
+  await settle();
+  assert.equal(activeCalls, 0, "poll ticks stay passive");
+
+  store.refreshActive();
+  await settle();
+  assert.equal(activeCalls, 1, "only an explicit trigger refreshes actively");
+});
+
+test("an active refresh never overlaps and applies its reading", async (t) => {
+  const { pending, load } = deferredLoader();
+  const activePending: Deferred[] = [];
+  const forces: (boolean | undefined)[] = [];
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: (signal, force) => {
+      forces.push(force);
+      return new Promise<QuotaSnapshot>((resolve, reject) => {
+        activePending.push({ resolve, reject, signal });
+      });
+    },
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  assert.equal(forces.length, 0, "the passive constructor read is not active");
+
+  store.refreshActive();
+  store.refreshActive(true);
+  assert.deepEqual(forces, [false], "an active refresh is single flight");
+  assert.equal(activePending[0].signal.aborted, false);
+
+  pending[0].resolve(SNAPSHOT);
+  await settle();
+  activePending[0].resolve({ ...SNAPSHOT, generatedAt: at(-MINUTE) });
+  await settle();
+
+  assert.equal(
+    store.snapshot()?.generatedAt,
+    at(-MINUTE),
+    "the active reading replaces the passive one",
+  );
+  assert.equal(store.loading(), false);
+
+  store.refreshActive(true);
+  assert.deepEqual(forces, [false, true], "a later explicit trigger may ask again");
+});
+
+test("an older passive result never overwrites a newer active success", async (t) => {
+  const { pending, load } = deferredLoader();
+  const activePending: Deferred[] = [];
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: (signal) =>
+      new Promise<QuotaSnapshot>((resolve, reject) => {
+        activePending.push({ resolve, reject, signal });
+      }),
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  store.refreshActive();
+  activePending[0].resolve({ ...SNAPSHOT, generatedAt: at(-MINUTE) });
+  await settle();
+  assert.equal(store.snapshot()?.generatedAt, at(-MINUTE));
+
+  pending[0].resolve({ ...SNAPSHOT, generatedAt: at(-2 * MINUTE) });
+  await settle();
+
+  assert.equal(
+    store.snapshot()?.generatedAt,
+    at(-MINUTE),
+    "the older passive success is dropped",
+  );
+  assert.equal(store.lastLoadedAt(), undefined, "a dropped read is not a load time");
+  assert.equal(store.loading(), false);
+});
+
+test("an older passive failure never overwrites a newer active success", async (t) => {
+  const { pending, load } = deferredLoader();
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: async () => ({ ...SNAPSHOT, generatedAt: at(-MINUTE) }),
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  store.refreshActive();
+  await settle();
+  assert.equal(store.snapshot()?.generatedAt, at(-MINUTE));
+
+  pending[0].reject(new Error("late passive failure"));
+  await settle();
+
+  assert.equal(store.failure(), undefined, "the older passive failure is dropped");
+  assert.equal(store.snapshot()?.generatedAt, at(-MINUTE), "the active success stays");
+});
+
+test("an older success keeps a newer failure and still shows its data", async (t) => {
+  const { pending, load } = deferredLoader();
+  const activePending: Deferred[] = [];
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: (signal) =>
+      new Promise<QuotaSnapshot>((resolve, reject) => {
+        activePending.push({ resolve, reject, signal });
+      }),
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  store.refreshActive();
+  activePending[0].reject(new Error("active failed"));
+  await settle();
+  assert.equal(store.snapshot(), undefined);
+  assert.equal(store.failure(), "active failed");
+
+  pending[0].resolve({ ...SNAPSHOT, generatedAt: at(-2 * MINUTE) });
+  await settle();
+
+  assert.equal(
+    store.snapshot()?.generatedAt,
+    at(-2 * MINUTE),
+    "a failure never blocks otherwise valid older data",
+  );
+  assert.equal(store.failure(), "active failed", "the newer failure stays visible");
+});
+
+test("passive and active settlement order preserves valid data and the newest error", async (t) => {
+  const passiveData = { ...SNAPSHOT, generatedAt: at(-2 * MINUTE) };
+  const activeData = { ...SNAPSHOT, generatedAt: at(-MINUTE) };
+  const passiveError = "passive failed";
+  const activeError = "active failed";
+
+  type Starts = "passive-first" | "active-first";
+  type Outcome = "success" | "failure";
+  type Scenario = {
+    starts: Starts;
+    passive: Outcome;
+    active: Outcome;
+    first: "passive" | "active";
+  };
+  const scenarios: Scenario[] = [];
+  for (const starts of ["passive-first", "active-first"] as const) {
+    for (const passive of ["success", "failure"] as const) {
+      for (const active of ["success", "failure"] as const) {
+        for (const first of ["passive", "active"] as const) {
+          scenarios.push({ starts, passive, active, first });
+        }
+      }
+    }
+  }
+  assert.equal(scenarios.length, 16);
+
+  for (const scenario of scenarios) {
+    const label = `${scenario.starts} | passive ${scenario.passive} | active ${scenario.active} | ${scenario.first} first`;
+    const { pending, load } = deferredLoader();
+    const activePending: Deferred[] = [];
+    const store = createQuotaStore(load, {
+      pollIntervalMs: 60_000,
+      activeRefresh: (signal) =>
+        new Promise<QuotaSnapshot>((resolve, reject) => {
+          activePending.push({ resolve, reject, signal });
+        }),
+      now: () => NOW,
+    });
+    t.after(() => store.dispose());
+
+    let passiveRequest: Deferred;
+    let activeRequest: Deferred;
+    if (scenario.starts === "passive-first") {
+      passiveRequest = pending[0];
+      store.refreshActive();
+      activeRequest = activePending[0];
+    } else {
+      pending[0].resolve(passiveData);
+      await settle();
+      store.refreshActive();
+      activeRequest = activePending[0];
+      store.refresh();
+      passiveRequest = pending[1];
+    }
+
+    const complete = (which: "passive" | "active") => {
+      if (which === "passive") {
+        if (scenario.passive === "success") passiveRequest.resolve(passiveData);
+        else passiveRequest.reject(new Error(passiveError));
+        return;
+      }
+      if (scenario.active === "success") activeRequest.resolve(activeData);
+      else activeRequest.reject(new Error(activeError));
+    };
+
+    complete(scenario.first);
+    await settle();
+    complete(scenario.first === "passive" ? "active" : "passive");
+    await settle();
+
+    const expectedData =
+      scenario.active === "success"
+        ? activeData.generatedAt
+        : scenario.passive === "success"
+          ? passiveData.generatedAt
+          : scenario.starts === "active-first"
+            ? passiveData.generatedAt
+            : undefined;
+    const expectedFailure =
+      scenario.starts === "passive-first"
+        ? scenario.active === "failure"
+          ? activeError
+          : undefined
+        : scenario.passive === "failure"
+          ? passiveError
+          : undefined;
+
+    assert.equal(store.snapshot()?.generatedAt, expectedData, `${label}: data`);
+    assert.equal(store.failure(), expectedFailure, `${label}: failure`);
+  }
+});
+
+test("a passive read started after the active settles may replace it", async (t) => {
+  const { pending, load } = deferredLoader();
+  const newer = { ...SNAPSHOT, generatedAt: at(0) };
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: async () => ({ ...SNAPSHOT, generatedAt: at(-MINUTE) }),
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  pending[0].resolve({ ...SNAPSHOT, generatedAt: at(-2 * MINUTE) });
+  await settle();
+  store.refreshActive();
+  await settle();
+  assert.equal(store.snapshot()?.generatedAt, at(-MINUTE));
+
+  store.refresh();
+  pending[1].resolve(newer);
+  await settle();
+
+  assert.equal(
+    store.snapshot()?.generatedAt,
+    newer.generatedAt,
+    "a passive read started after the active settle can replace it",
+  );
+});
+
+test("an active failure preserves data and reports itself", async (t) => {
+  const cases: { name: string; active: () => Promise<QuotaSnapshot> }[] = [
+    {
+      name: "backend error snapshot",
+      active: async () => ({ ...SNAPSHOT, providers: [], error: "Local quota service unavailable" }),
+    },
+    {
+      name: "rejection",
+      active: async () => {
+        throw new Error("refresh failed");
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    const store = createQuotaStore(async () => SNAPSHOT, {
+      pollIntervalMs: 60_000,
+      activeRefresh: item.active,
+      now: () => NOW,
+    });
+    t.after(() => store.dispose());
+    await settle();
+    store.refreshActive();
+    await settle();
+    assert.equal(store.snapshot(), SNAPSHOT, `${item.name} keeps prior data`);
+    assert.ok(store.failure(), `${item.name} reports a failure`);
+  }
+
+  // With no snapshot yet, the active failure is the only state to show.
+  const { load } = deferredLoader();
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    activeRefresh: async () => {
+      throw new Error("refresh failed early");
+    },
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+  store.refreshActive();
+  await settle();
+  assert.equal(store.snapshot(), undefined);
+  assert.equal(store.failure(), "refresh failed early");
+});
+
+test("store bounds an active refresh and ignores a late result", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => t.mock.timers.reset());
+  const { pending, load } = deferredLoader();
+  const active: Deferred[] = [];
+  const store = createQuotaStore(load, {
+    pollIntervalMs: 60_000,
+    requestTimeoutMs: 10_000,
+    activeRefresh: (signal) =>
+      new Promise<QuotaSnapshot>((resolve, reject) => {
+        active.push({ resolve, reject, signal });
+      }),
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  pending[0].resolve(SNAPSHOT);
+  await flush();
+  assert.equal(store.snapshot(), SNAPSHOT);
+
+  store.refreshActive();
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(
+    active[0].signal.aborted,
+    false,
+    "the deadline leaves room for the backend's active rebuild and passive reread",
+  );
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(active[0].signal.aborted, true, "the deadline aborts after 20 seconds");
+  assert.equal(store.snapshot(), SNAPSHOT, "a timed-out active refresh keeps prior data");
+  assert.match(store.failure() ?? "", /timed out/u, "a timed-out active refresh reports itself");
+
+  active[0].resolve({ ...SNAPSHOT, generatedAt: at(MINUTE) });
+  await flush();
+  assert.equal(store.snapshot(), SNAPSHOT, "a late active result is ignored");
+
+  store.refreshActive();
+  assert.equal(active.length, 2, "a later trigger is allowed after the bound");
+});
+
+test("a newer report keeps the last pooled windows with honest age", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.after(() => t.mock.timers.reset());
+
+  const older: QuotaSnapshot = {
+    ...SNAPSHOT,
+    generatedAt: at(-6 * MINUTE),
+    providers: [
+      {
+        provider: "openai",
+        pooled: { windows: [window({ usedPercent: 38, resetsAt: at(2 * HOUR) })] },
+        accounts: [],
+      },
+    ],
+  };
+  const emptyReport: QuotaSnapshot = {
+    ...SNAPSHOT,
+    generatedAt: at(0),
+    providers: [{ provider: "openai", pooled: { windows: [] }, accounts: [] }],
+  };
+  const noProviders: QuotaSnapshot = { ...SNAPSHOT, generatedAt: at(0), providers: [] };
+  const reports = [older, emptyReport, noProviders];
+  let calls = 0;
+  const store = createQuotaStore(async () => reports[Math.min(calls++, reports.length - 1)], {
+    pollIntervalMs: 60_000,
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  await settle();
+  assert.equal(store.snapshot()?.providers[0]?.pooled.windows.length, 1);
+
+  t.mock.timers.tick(60_000);
+  await settle();
+
+  const kept = store.snapshot();
+  assert.equal(kept?.providers.length, 1, "an empty provider report keeps its pooled windows");
+  assert.equal(kept?.providers[0].pooled.windows[0].usedPercent, 38, "the real pooled value is kept");
+  assert.equal(kept?.generatedAt, older.generatedAt, "age comes from the older report");
+  assert.equal(store.retained(), true);
+
+  const retainedReading = reading({ snapshot: kept, retained: true, now: NOW });
+  assert.equal(quotaSidebarStatus(retainedReading), "stale 6m", "the retained pool reads stale");
+  const sidebar = joined(quotaSidebarRows(retainedReading));
+  assert.ok(sidebar.includes("Last pooled report retained."), "the sidebar marks retained data");
+  assert.ok(sidebar.includes("Weekly ▰▰▰▰▰▰▱▱▱▱ 62% 2h"), "the retained pool keeps its bar");
+  const dialog = joined(quotaDialogRows(retainedReading));
+  assert.ok(dialog.includes("Last pooled report retained."), "the dialog marks retained data");
+  assert.ok(dialog.includes("Weekly: 62% left"));
+
+  t.mock.timers.tick(60_000);
+  await settle();
+  const stillRetained = store.snapshot();
+  assert.equal(stillRetained?.providers.length, 1, "a provider that disappears stays retained");
+  assert.equal(stillRetained?.providers[0].provider, "openai");
+  assert.equal(stillRetained?.providers[0].pooled.windows[0].usedPercent, 38);
+  assert.equal(store.snapshot()?.error, undefined, "retention is not an error state");
+});
+
+test("a retained provider keeps pool data but never stale accounts", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.after(() => t.mock.timers.reset());
+
+  const older: QuotaSnapshot = {
+    ...SNAPSHOT,
+    generatedAt: at(-MINUTE),
+    providers: [
+      {
+        provider: "opencode-go",
+        pooled: { windows: [window({ usedPercent: 25, resetsAt: at(HOUR) })], nextResetAt: at(HOUR) },
+        accounts: [
+          {
+            label: "work",
+            state: "available",
+            windows: [window({ usedPercent: 90, resetsAt: at(HOUR) })],
+          },
+        ],
+      },
+    ],
+  };
+  const noProviders: QuotaSnapshot = { ...SNAPSHOT, generatedAt: at(0), providers: [] };
+  let calls = 0;
+  const store = createQuotaStore(async () => (++calls === 1 ? older : noProviders), {
+    pollIntervalMs: 60_000,
+    now: () => NOW,
+  });
+  t.after(() => store.dispose());
+
+  await settle();
+  assert.equal(store.snapshot()?.providers[0]?.accounts.length, 1);
+
+  t.mock.timers.tick(60_000);
+  await settle();
+
+  const kept = store.snapshot()?.providers[0];
+  assert.equal(kept?.provider, "opencode-go", "the provider stays visible");
+  assert.equal(kept?.pooled.windows[0].usedPercent, 25, "only the pool data survives");
+  assert.equal(kept?.accounts.length, 0, "stale account states do not come back");
+  assert.equal(store.retained(), true);
+
+  const sidebar = joined(
+    quotaSidebarRows(reading({ snapshot: store.snapshot(), retained: true, now: NOW })),
+  );
+  assert.ok(sidebar.includes("75%"), "the retained pool percentage is shown");
+  assert.ok(!sidebar.includes("Accounts"), "no retained account section");
+  assert.ok(!sidebar.includes("work"), "no retained account label");
+  assert.ok(!sidebar.includes("10%"), "no retained account quota");
+});
+
 type Claim = { append: string; render: (...args: never[]) => unknown };
 type Layer = {
   mode?: string;
@@ -1308,6 +1749,8 @@ function start(options: { snapshotValue?: QuotaSnapshot } = {}) {
   const dialogs: (() => unknown)[] = [];
   const sizes: string[] = [];
   const inputs: SnapshotInput[] = [];
+  const refreshes: SnapshotInput[] = [];
+  const events: { type: string; handler: () => void }[] = [];
   const unsubscribed: string[] = [];
   let definitions: unknown[] = [];
   let cleared = 0;
@@ -1333,6 +1776,10 @@ function start(options: { snapshotValue?: QuotaSnapshot } = {}) {
             inputs.push({ input, options: rpcOptions });
             return value;
           },
+          refresh: async (input: unknown, rpcOptions: SnapshotInput["options"]) => {
+            refreshes.push({ input, options: rpcOptions });
+            return value;
+          },
         };
       },
     },
@@ -1343,6 +1790,12 @@ function start(options: { snapshotValue?: QuotaSnapshot } = {}) {
     },
     data: {
       location: { default: () => ({ directory: "/repo" }) },
+      on: (type: string, handler: () => void) => {
+        events.push({ type, handler });
+        return () => {
+          unsubscribed.push(`event:${type}`);
+        };
+      },
     },
     ui: {
       slot: (claim: Claim) => {
@@ -1371,6 +1824,8 @@ function start(options: { snapshotValue?: QuotaSnapshot } = {}) {
     dialogs,
     sizes,
     inputs,
+    refreshes,
+    events,
     unsubscribed,
     definitions,
     dispose,
@@ -1408,16 +1863,47 @@ test("registers one sidebar and one native /quota command", async (t) => {
   assert.equal(mounted.inputs[0].options.location.directory, "/repo");
   assert.ok(mounted.inputs[0].options.signal instanceof AbortSignal);
   assert.equal(mounted.definitions[0], quotaRpc);
+  assert.equal(mounted.refreshes.length, 1, "startup asks for one active refresh");
+  assert.deepEqual(mounted.refreshes[0].input, {});
+  assert.equal(mounted.refreshes[0].options.location.directory, "/repo");
+  assert.deepEqual(
+    mounted.events.map((event) => event.type),
+    ["session.step.ended"],
+    "only a completed step triggers an active refresh",
+  );
+
+  mounted.events[0].handler();
+  await settle();
+  assert.equal(mounted.refreshes.length, 2, "a completed step asks for one active refresh");
+  assert.deepEqual(mounted.refreshes[1].input, {}, "a session event stays automatic");
 
   command.run?.();
   await settle();
   assert.equal(mounted.dialogs.length, 1);
   assert.deepEqual(mounted.sizes, ["large"]);
-  assert.equal(mounted.inputs.length, 2, "opening the command asks for a fresh reading");
+  assert.equal(mounted.inputs.length, 1, "opening the command does not add a passive read");
+  assert.equal(mounted.refreshes.length, 3, "opening the command asks for one explicit refresh");
+  assert.deepEqual(mounted.refreshes[2].input, { force: true }, "the command bypasses the cooldown");
   assert.equal(mounted.cleared(), 0);
 
   mounted.dispose?.();
-  assert.deepEqual(mounted.unsubscribed, ["slot:sidebar.content"]);
+  assert.deepEqual(mounted.unsubscribed, ["event:session.step.ended", "slot:sidebar.content"]);
+});
+
+test("a sidebar mount asks for one active refresh", async (t) => {
+  const calls: (boolean | undefined)[] = [];
+  const store = {
+    refreshActive: (force?: boolean) => {
+      calls.push(force);
+    },
+  } as unknown as QuotaStore;
+  const dispose = createRoot((disposeRoot) => {
+    activateOnSidebarMount(store);
+    return disposeRoot;
+  });
+  t.after(dispose);
+  await settle();
+  assert.deepEqual(calls, [undefined], "the mount hook asks once without forcing");
 });
 
 test("the command surface has no prompt, message, toast, or extra command paths", () => {

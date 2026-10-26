@@ -12,7 +12,10 @@ import {
   fetchQuota,
   normalizeLabel,
   OPENCODEX_QUOTA_ENDPOINT,
+  OPENCODEX_REFRESH_COOLDOWN_MS,
+  OPENCODEX_REFRESH_ENDPOINT,
   parseQuotaPool,
+  refreshQuota,
   type QuotaSnapshot,
   resolveAdminToken,
 } from "../src/quota.ts";
@@ -59,6 +62,25 @@ function useEnv(): { restore: () => void } {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    },
+  };
+}
+
+/** A clock well clear of the previous test's attempt, so cooldown state is isolated. */
+let clockBase = 1_000_000_000_000;
+
+function useClock(): { advance: (ms: number) => void; restore: () => void } {
+  const original = Date.now;
+  let now = (clockBase += OPENCODEX_REFRESH_COOLDOWN_MS * 2);
+  Date.now = () => now;
+  return {
+    advance: (ms) => {
+      now += ms;
+    },
+    restore: () => {
+      // Start the next test clear of this test's last attempt, however far it ran.
+      clockBase = Math.max(clockBase, now);
+      Date.now = original;
     },
   };
 }
@@ -664,6 +686,287 @@ test("fetchQuota reports tokenConfigured false when no token is available", asyn
     });
   } finally {
     // No fetch stub is installed; no request is made without a token.
+  }
+});
+
+test("refreshQuota requests the fixed refresh endpoint, ignores its body, then reads the passive pool", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+  let bodyCancelled = false;
+
+  stubFetch(state, async (url) => {
+    if (url === OPENCODEX_REFRESH_ENDPOINT) {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("unparsed refresh body"));
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify(PAYLOAD), { status: 200 });
+  });
+
+  try {
+    const snapshot = await refreshQuota();
+    assert.equal(snapshot.error, undefined);
+    assert.equal(snapshot.generatedAt, "2026-10-24T10:00:05.000Z");
+    assert.deepEqual(snapshot.diagnostics, {
+      endpoint: OPENCODEX_QUOTA_ENDPOINT,
+      tokenConfigured: true,
+    });
+
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [OPENCODEX_REFRESH_ENDPOINT, OPENCODEX_QUOTA_ENDPOINT],
+    );
+    assert.equal(OPENCODEX_REFRESH_ENDPOINT, "http://127.0.0.1:10100/api/provider-quotas?refresh=1");
+
+    const active = state.calls[0]?.init;
+    assert.equal(active?.method, undefined, "the active call is a GET");
+    assert.equal(active?.redirect, "error");
+    assert.ok(active?.signal, "the active call is bounded by a timeout signal");
+    assert.deepEqual(active?.headers, { Authorization: "Bearer test-token" });
+    assert.equal(bodyCancelled, true, "the active response body is cancelled unread");
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("refreshQuota shares one active attempt across overlapping automatic and explicit calls", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  stubFetch(state, async (url) => {
+    if (url === OPENCODEX_REFRESH_ENDPOINT) {
+      await gate;
+      return new Response("ignored", { status: 200 });
+    }
+    return new Response(JSON.stringify(PAYLOAD), { status: 200 });
+  });
+
+  try {
+    const first = refreshQuota();
+    const second = refreshQuota({ force: true });
+    const third = refreshQuota();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [OPENCODEX_REFRESH_ENDPOINT],
+      "overlapping calls, including an explicit one, join the attempt",
+    );
+
+    release();
+    const [a, b, c] = await Promise.all([first, second, third]);
+    assert.deepEqual(a, b);
+    assert.deepEqual(a, c);
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [OPENCODEX_REFRESH_ENDPOINT, OPENCODEX_QUOTA_ENDPOINT],
+      "one active request and one passive read in total",
+    );
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("refreshQuota enforces the five-minute cooldown and cools down to the passive pool", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+
+  stubFetch(state, async (url) =>
+    url === OPENCODEX_REFRESH_ENDPOINT
+      ? new Response("ignored", { status: 200 })
+      : new Response(JSON.stringify(PAYLOAD), { status: 200 }),
+  );
+
+  try {
+    assert.equal((await refreshQuota()).error, undefined);
+    assert.equal(state.calls.length, 2);
+
+    clock.advance(OPENCODEX_REFRESH_COOLDOWN_MS - 1);
+    const cooled = await refreshQuota();
+    assert.equal(cooled.error, undefined);
+    assert.equal(state.calls.length, 3, "only the passive read runs inside the cooldown");
+    assert.equal(state.calls[2]?.url, OPENCODEX_QUOTA_ENDPOINT);
+
+    clock.advance(1);
+    assert.equal((await refreshQuota()).error, undefined);
+    assert.equal(state.calls.length, 5, "the active attempt resumes at the boundary");
+    assert.equal(state.calls[3]?.url, OPENCODEX_REFRESH_ENDPOINT);
+    assert.equal(state.calls[4]?.url, OPENCODEX_QUOTA_ENDPOINT);
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("an explicit force bypasses the cooldown and restarts automatic throttling", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+
+  stubFetch(state, async (url) =>
+    url === OPENCODEX_REFRESH_ENDPOINT
+      ? new Response("ignored", { status: 200 })
+      : new Response(JSON.stringify(PAYLOAD), { status: 200 }),
+  );
+
+  try {
+    assert.equal((await refreshQuota()).error, undefined);
+    clock.advance(1);
+
+    assert.equal((await refreshQuota({ force: false })).error, undefined);
+    assert.equal(state.calls[2]?.url, OPENCODEX_QUOTA_ENDPOINT, "force false stays throttled");
+
+    assert.equal((await refreshQuota({ force: true })).error, undefined);
+    assert.equal(state.calls[3]?.url, OPENCODEX_REFRESH_ENDPOINT, "force runs the active rebuild");
+    assert.equal(state.calls[4]?.url, OPENCODEX_QUOTA_ENDPOINT);
+
+    clock.advance(OPENCODEX_REFRESH_COOLDOWN_MS - 1);
+    assert.equal((await refreshQuota()).error, undefined);
+    assert.equal(state.calls.length, 6, "the forced attempt restarts the cooldown");
+    assert.equal(state.calls[5]?.url, OPENCODEX_QUOTA_ENDPOINT);
+
+    clock.advance(1);
+    assert.equal((await refreshQuota()).error, undefined);
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [
+        OPENCODEX_REFRESH_ENDPOINT,
+        OPENCODEX_QUOTA_ENDPOINT,
+        OPENCODEX_QUOTA_ENDPOINT,
+        OPENCODEX_REFRESH_ENDPOINT,
+        OPENCODEX_QUOTA_ENDPOINT,
+        OPENCODEX_QUOTA_ENDPOINT,
+        OPENCODEX_REFRESH_ENDPOINT,
+        OPENCODEX_QUOTA_ENDPOINT,
+      ],
+      "automatic refreshes resume only after the forced attempt's cooldown",
+    );
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("a failed active attempt consumes the cooldown and exposes no details", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+  const leaked = "Bearer test-token /home/example/.opencodex";
+
+  stubFetch(state, async (url) => {
+    if (url === OPENCODEX_REFRESH_ENDPOINT) {
+      return new Response(`refresh failed: ${leaked}`, { status: 503 });
+    }
+    return new Response(JSON.stringify(PAYLOAD), { status: 200 });
+  });
+
+  try {
+    const failed = await refreshQuota();
+    assert.deepEqual(failed, {
+      providers: [],
+      error: "Local quota service returned HTTP 503",
+      diagnostics: { endpoint: OPENCODEX_QUOTA_ENDPOINT, tokenConfigured: true },
+    });
+    assert.doesNotMatch(JSON.stringify(failed), /test-token|\.opencodex/);
+    assert.equal(state.calls.length, 1, "no passive read after the active failure");
+
+    clock.advance(OPENCODEX_REFRESH_COOLDOWN_MS - 1);
+    const cooled = await refreshQuota();
+    assert.equal(cooled.error, undefined);
+    assert.ok(cooled.providers.length > 0);
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [OPENCODEX_REFRESH_ENDPOINT, OPENCODEX_QUOTA_ENDPOINT],
+      "the failure holds the cooldown instead of retrying",
+    );
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("refreshQuota maps redirect rejection and timeouts to safe snapshot errors", async () => {
+  withEnvToken();
+  const clock = useClock();
+  const state = capture();
+
+  try {
+    stubFetch(state, async (url) => {
+      if (url === OPENCODEX_REFRESH_ENDPOINT) {
+        throw new TypeError("unexpected redirect to /home/example Bearer test-token");
+      }
+      return new Response(JSON.stringify(PAYLOAD), { status: 200 });
+    });
+    const redirect = await refreshQuota();
+    assert.deepEqual(redirect.providers, []);
+    assert.equal(redirect.error, "Local quota service unavailable");
+    assert.doesNotMatch(JSON.stringify(redirect), /test-token|\.opencodex|\/home\/example/);
+
+    // Move past the failure cooldown with a fresh, isolated attempt time.
+    clock.advance(OPENCODEX_REFRESH_COOLDOWN_MS);
+    stubFetch(state, async (url) => {
+      if (url === OPENCODEX_REFRESH_ENDPOINT) {
+        const error = new Error("The operation was aborted due to timeout");
+        error.name = "TimeoutError";
+        throw error;
+      }
+      return new Response(JSON.stringify(PAYLOAD), { status: 200 });
+    });
+    const timeout = await refreshQuota();
+    assert.deepEqual(timeout.providers, []);
+    assert.equal(timeout.error, "Local quota service timed out");
+  } finally {
+    state.restore();
+    clock.restore();
+  }
+});
+
+test("refreshQuota makes no active request and no cooldown without a token", async () => {
+  delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+  process.env.OPENCODEX_ADMIN_TOKEN_FILE = join(tmpdir(), "opencodex-quota-missing-token");
+  const clock = useClock();
+  const state = capture();
+
+  stubFetch(state, async (url) =>
+    url === OPENCODEX_REFRESH_ENDPOINT
+      ? new Response("ignored", { status: 200 })
+      : new Response(JSON.stringify(PAYLOAD), { status: 200 }),
+  );
+
+  try {
+    const missing = await refreshQuota();
+    assert.equal(state.calls.length, 0, "no active request without a token");
+    assert.match(missing.error ?? "", /OPENCODEX_ADMIN_AUTH_TOKEN/);
+    assert.deepEqual(missing.providers, []);
+    assert.equal(missing.diagnostics.tokenConfigured, false);
+
+    // A token becoming available is not blocked by a cooldown that never began.
+    withEnvToken();
+    const refreshed = await refreshQuota();
+    assert.equal(refreshed.error, undefined);
+    assert.deepEqual(
+      state.calls.map((call) => call.url),
+      [OPENCODEX_REFRESH_ENDPOINT, OPENCODEX_QUOTA_ENDPOINT],
+    );
+  } finally {
+    state.restore();
+    clock.restore();
   }
 });
 

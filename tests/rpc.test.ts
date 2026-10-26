@@ -4,7 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { QUOTA_RPC_ID, quotaRpc, type QuotaSnapshotInput } from "../src/rpc.ts";
+import {
+  QUOTA_RPC_ID,
+  quotaRpc,
+  type QuotaRefreshInput,
+  type QuotaSnapshotInput,
+} from "../src/rpc.ts";
 import type { QuotaSnapshot } from "../src/quota.ts";
 
 type Validator = {
@@ -51,10 +56,10 @@ const SNAPSHOT: QuotaSnapshot = {
   diagnostics: { endpoint: "http://127.0.0.1:10100/api/quota-pool", tokenConfigured: true },
 };
 
-test("quotaRpc is the opencodex.quota namespace with a single snapshot method", () => {
+test("quotaRpc is the opencodex.quota namespace with snapshot and refresh methods", () => {
   assert.equal(QUOTA_RPC_ID, "opencodex.quota");
   assert.equal(quotaRpc.id, "opencodex.quota");
-  assert.deepEqual(Object.keys(quotaRpc.methods), ["snapshot"]);
+  assert.deepEqual(Object.keys(quotaRpc.methods), ["snapshot", "refresh"]);
   assert.deepEqual(quotaRpc.events, {});
 });
 
@@ -66,6 +71,26 @@ test("the snapshot input has no reset or refresh flag", async () => {
   assert.equal((await validate(input, "quota")).issues?.length, 1);
   assert.equal((await validate(input, { notifyReset: true })).issues?.length, 1);
   assert.equal((await validate(input, { refresh: true })).issues?.length, 1);
+  assert.equal((await validate(input, { force: true })).issues?.length, 1);
+});
+
+test("the refresh input accepts only an optional boolean force flag", async () => {
+  const input = quotaRpc.methods.refresh.input;
+  const empty: QuotaSnapshotInput = {};
+  const forced: QuotaRefreshInput = { force: true };
+  assert.deepEqual(await validate(input, empty), { value: empty });
+  assert.deepEqual(await validate(input, undefined), { value: undefined });
+  assert.deepEqual(await validate(input, forced), { value: forced });
+  assert.deepEqual(await validate(input, { force: false }), { value: { force: false } });
+  assert.equal((await validate(input, { refresh: true })).issues?.length, 1);
+  assert.equal((await validate(input, { force: "true" })).issues?.length, 1);
+  assert.equal((await validate(input, { force: 1 })).issues?.length, 1);
+  assert.equal((await validate(input, { force: null })).issues?.length, 1);
+  assert.equal((await validate(input, { force: true, extra: 1 })).issues?.length, 1);
+  assert.equal((await validate(input, "refresh")).issues?.length, 1);
+
+  assert.equal(quotaRpc.methods.refresh.output, quotaRpc.methods.snapshot.output);
+  assert.deepEqual(await validate(quotaRpc.methods.refresh.output, SNAPSHOT), { value: SNAPSHOT });
 });
 
 test("the snapshot output accepts a normalized pool and rejects malformed shapes", async () => {
