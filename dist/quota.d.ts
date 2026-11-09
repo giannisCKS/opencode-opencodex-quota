@@ -1,6 +1,6 @@
-/** Fixed local OpenCodex quota-pool endpoint. Never configurable by callers. */
+/** Legacy local OpenCodex quota-pool endpoint, also used in diagnostics. */
 export declare const OPENCODEX_QUOTA_ENDPOINT = "http://127.0.0.1:10100/api/quota-pool";
-/** Fixed local OpenCodex provider-report rebuild endpoint. Never configurable. */
+/** Legacy local OpenCodex provider-report rebuild endpoint. */
 export declare const OPENCODEX_REFRESH_ENDPOINT = "http://127.0.0.1:10100/api/provider-quotas?refresh=1";
 /** Minimum gap between active refresh attempts, successful or failed. */
 export declare const OPENCODEX_REFRESH_COOLDOWN_MS: number;
@@ -85,7 +85,7 @@ export declare function normalizeLabel(value: unknown): string | undefined;
  */
 export declare function parseQuotaPool(payload: unknown): SnapshotBody;
 /**
- * Fetches the passive OpenCodex quota pool from the fixed local endpoint.
+ * Fetches the passive OpenCodex quota pool from the attested local endpoint or legacy loopback.
  *
  * Never throws. Redirects are rejected and all untrusted fields are validated,
  * so a malformed or hostile local response produces a safe `error` string. The

@@ -1,11 +1,14 @@
 /**
  * Core tests for the passive OpenCodex quota-pool fetching and normalization.
- * The local management endpoint is stubbed with `globalThis.fetch`.
+ * The local management endpoint is stubbed at the Node HTTP transport.
  */
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import test, { afterEach, beforeEach } from "node:test";
 
 import {
@@ -32,11 +35,11 @@ type FetchStub = (url: string, init?: RequestInit) => Promise<Response>;
 
 function capture(): { calls: FetchCall[]; restore: () => void } {
   const calls: FetchCall[] = [];
-  const original = globalThis.fetch;
+  const original = http.get;
   return {
     calls,
     restore: () => {
-      globalThis.fetch = original;
+      http.get = original;
     },
   };
 }
@@ -48,10 +51,17 @@ async function failure(): Promise<{ providers: unknown[]; error?: string }> {
 }
 
 function stubFetch(state: { calls: FetchCall[] }, behaviour: FetchStub): void {
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  http.get = ((input: string, options: { headers: Record<string, string>; signal: AbortSignal }, callback: (response: unknown) => void) => {
+    const request = new EventEmitter();
+    const init: RequestInit = { headers: options.headers, signal: options.signal, redirect: "error" };
     state.calls.push({ url: String(input), init });
-    return behaviour(String(input), init);
-  }) as typeof fetch;
+    void behaviour(String(input), init).then((response) => {
+      const stream = response.body ? Readable.fromWeb(response.body as import("node:stream/web").ReadableStream) : Readable.from([]);
+      Object.assign(stream, { statusCode: response.status, headers: Object.fromEntries(response.headers.entries()) });
+      callback(stream);
+    }, (error) => request.emit("error", error));
+    return request;
+  }) as typeof http.get;
 }
 
 function useEnv(): { restore: () => void } {
@@ -89,6 +99,7 @@ let env: { restore: () => void };
 
 beforeEach(() => {
   env = useEnv();
+  process.env.OPENCODEX_HOME = join(tmpdir(), "opencodex-quota-test-nonexistent-home");
 });
 
 afterEach(() => {
@@ -744,12 +755,15 @@ test("refreshQuota shares one active attempt across overlapping automatic and ex
   const clock = useClock();
   const state = capture();
   let release!: () => void;
+  let started!: () => void;
+  const requestStarted = new Promise<void>((resolve) => { started = resolve; });
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
 
   stubFetch(state, async (url) => {
     if (url === OPENCODEX_REFRESH_ENDPOINT) {
+      started();
       await gate;
       return new Response("ignored", { status: 200 });
     }
@@ -760,7 +774,7 @@ test("refreshQuota shares one active attempt across overlapping automatic and ex
     const first = refreshQuota();
     const second = refreshQuota({ force: true });
     const third = refreshQuota();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await requestStarted;
     assert.deepEqual(
       state.calls.map((call) => call.url),
       [OPENCODEX_REFRESH_ENDPOINT],
@@ -777,6 +791,7 @@ test("refreshQuota shares one active attempt across overlapping automatic and ex
       "one active request and one passive read in total",
     );
   } finally {
+    release();
     state.restore();
     clock.restore();
   }

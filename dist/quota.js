@@ -9,14 +9,19 @@
  * reports (`GET /api/provider-quotas?refresh=1`) and then rereads the passive
  * pool. Active attempts are throttled and shared process-wide; an explicit
  * request may bypass the throttle but still shares an in-flight attempt. No
- * other endpoint is used, and no quota reading is invented locally.
+ * Health attestation may precede either request; no quota reading is invented locally.
  */
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
+import http from "node:http";
+import { isIP } from "node:net";
+import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
-/** Fixed local OpenCodex quota-pool endpoint. Never configurable by callers. */
+import { Readable } from "node:stream";
+/** Legacy local OpenCodex quota-pool endpoint, also used in diagnostics. */
 export const OPENCODEX_QUOTA_ENDPOINT = "http://127.0.0.1:10100/api/quota-pool";
-/** Fixed local OpenCodex provider-report rebuild endpoint. Never configurable. */
+/** Legacy local OpenCodex provider-report rebuild endpoint. */
 export const OPENCODEX_REFRESH_ENDPOINT = "http://127.0.0.1:10100/api/provider-quotas?refresh=1";
 /** Minimum gap between active refresh attempts, successful or failed. */
 export const OPENCODEX_REFRESH_COOLDOWN_MS = 5 * 60_000;
@@ -112,6 +117,86 @@ async function readBoundedBody(response) {
         offset += chunk.byteLength;
     }
     return new TextDecoder().decode(bytes);
+}
+/** Direct HTTP avoids proxy configuration and never follows redirects. */
+function localRequest(url, headers) {
+    return new Promise((resolve, reject) => {
+        const signal = AbortSignal.timeout(OPENCODEX_QUOTA_TIMEOUT_MS);
+        const request = http.get(url, { headers, signal, agent: false }, (response) => {
+            const responseHeaders = new Headers();
+            for (const [name, value] of Object.entries(response.headers)) {
+                if (value !== undefined)
+                    responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+            }
+            const status = response.statusCode ?? 500;
+            if (status >= 300 && status < 400) {
+                response.destroy();
+                reject(new Error("redirect rejected"));
+                return;
+            }
+            const body = Readable.toWeb(response);
+            resolve(new Response(status === 204 || status === 205 || status === 304 ? null : body, { status, headers: responseHeaders }));
+        });
+        request.on("error", (error) => reject(signal.aborted ? signal.reason : error));
+    });
+}
+/** Read only private, bounded runtime metadata; unsupported legacy records use loopback. */
+async function managementBase() {
+    const fallback = "http://127.0.0.1:10100";
+    if (process.platform === "win32")
+        return fallback;
+    const path = join(expandHomePath(process.env.OPENCODEX_HOME?.trim() || "~/.opencodex"), "runtime-port.json");
+    let file;
+    try {
+        file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    }
+    catch (error) {
+        if (error.code === "ENOENT")
+            return fallback;
+        throw error;
+    }
+    let state;
+    try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0 || stat.size > 16_384) {
+            throw new Error("unsafe runtime metadata");
+        }
+        const bytes = Buffer.alloc(16_385);
+        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+        if (bytesRead > 16_384)
+            throw new Error("runtime metadata too large");
+        state = record(JSON.parse(bytes.subarray(0, bytesRead).toString("utf8")));
+    }
+    finally {
+        await file.close();
+    }
+    if (!state || !Number.isSafeInteger(state.pid) || Number(state.pid) <= 0 ||
+        !Number.isInteger(state.port) || Number(state.port) <= 0 || Number(state.port) > 65535 ||
+        (state.hostname !== undefined && typeof state.hostname !== "string")) {
+        throw new Error("invalid runtime metadata");
+    }
+    if (state.attestationSecret === undefined)
+        return fallback;
+    if (typeof state.attestationSecret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(state.attestationSecret)) {
+        throw new Error("invalid attestation secret");
+    }
+    const hostname = state.hostname === undefined || ["0.0.0.0", "::", "[::]", "*"].includes(String(state.hostname))
+        ? "127.0.0.1" : state.hostname;
+    if (typeof hostname !== "string" || !isIP(hostname) || !Object.values(networkInterfaces()).flat().some((item) => item?.address === hostname)) {
+        throw new Error("management address is not assigned locally");
+    }
+    const base = `http://${isIP(hostname) === 6 ? `[${hostname}]` : hostname}:${state.port}`;
+    const challenge = randomBytes(32).toString("base64url");
+    const response = await localRequest(`${base}/healthz`, { "x-opencodex-attestation-challenge": challenge });
+    const body = record(JSON.parse(await readBoundedBody(response)));
+    const proof = response.headers.get("x-opencodex-attestation-proof");
+    const expected = createHmac("sha256", state.attestationSecret)
+        .update(`opencodex-local-management-v1\n${challenge}\n${state.pid}\n${state.port}`).digest("base64url");
+    if (!response.ok || body?.service !== "opencodex" || body.pid !== state.pid || body.port !== state.port ||
+        !proof || !/^[A-Za-z0-9_-]{43}$/.test(proof) || !timingSafeEqual(Buffer.from(proof), Buffer.from(expected))) {
+        throw new Error("management attestation failed");
+    }
+    return base;
 }
 const WINDOW_KINDS = [
     "burst_5h",
@@ -315,7 +400,7 @@ async function cancelBody(response) {
     }
 }
 /**
- * Fetches the passive OpenCodex quota pool from the fixed local endpoint.
+ * Fetches the passive OpenCodex quota pool from the attested local endpoint or legacy loopback.
  *
  * Never throws. Redirects are rejected and all untrusted fields are validated,
  * so a malformed or hostile local response produces a safe `error` string. The
@@ -339,11 +424,7 @@ async function requestQuota(token) {
     }
     let response;
     try {
-        response = await fetch(OPENCODEX_QUOTA_ENDPOINT, {
-            headers: { Authorization: `Bearer ${token}` },
-            redirect: "error",
-            signal: AbortSignal.timeout(OPENCODEX_QUOTA_TIMEOUT_MS),
-        });
+        response = await localRequest(`${await managementBase()}/api/quota-pool`, { Authorization: `Bearer ${token}` });
     }
     catch (error) {
         return fetchFailure(error);
@@ -394,11 +475,7 @@ let refreshInFlight;
 async function requestRefresh(token) {
     let response;
     try {
-        response = await fetch(OPENCODEX_REFRESH_ENDPOINT, {
-            headers: { Authorization: `Bearer ${token}` },
-            redirect: "error",
-            signal: AbortSignal.timeout(OPENCODEX_QUOTA_TIMEOUT_MS),
-        });
+        response = await localRequest(`${await managementBase()}/api/provider-quotas?refresh=1`, { Authorization: `Bearer ${token}` });
     }
     catch (error) {
         return fetchFailure(error);

@@ -2,6 +2,12 @@
  * Server plugin tests: the plugin registers only the quota RPC.
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
 import test, { afterEach, beforeEach } from "node:test";
 
 import { OpenCodexQuotaPlugin, default as defaultExport } from "../src/index.ts";
@@ -86,9 +92,11 @@ function fakeContext() {
 let env: { restore: () => void };
 let fetchRestore: () => void;
 let fetchCalls: { url: string; init: RequestInit | undefined }[];
+let home: string;
 
-beforeEach(() => {
-  const saved = [["OPENCODEX_ADMIN_AUTH_TOKEN", process.env.OPENCODEX_ADMIN_AUTH_TOKEN]] as const;
+beforeEach(async () => {
+  home = await mkdtemp(join(tmpdir(), "opencodex-quota-server-"));
+  const saved = (["OPENCODEX_ADMIN_AUTH_TOKEN", "OPENCODEX_HOME"] as const).map((key) => [key, process.env[key]] as const);
   env = {
     restore: () => {
       for (const [key, value] of saved) {
@@ -98,26 +106,31 @@ beforeEach(() => {
     },
   };
   process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "test-token";
+  process.env.OPENCODEX_HOME = home;
 
   fetchCalls = [];
-  const original = globalThis.fetch;
+  const original = http.get;
   fetchRestore = () => {
-    globalThis.fetch = original;
+    http.get = original;
   };
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  http.get = ((input: string, options: { headers: Record<string, string>; signal: AbortSignal }, callback: (response: unknown) => void) => {
+    const request = new EventEmitter();
     const url = String(input);
+    const init: RequestInit = { headers: options.headers, signal: options.signal, redirect: "error" };
     fetchCalls.push({ url, init });
-    if (url === REFRESH_ENDPOINT) {
-      // The active response body is never parsed, so its content is irrelevant.
-      return new Response("not parsed", { status: 200 });
-    }
-    return new Response(JSON.stringify(PAYLOAD), { status: 200 });
-  }) as typeof fetch;
+    // The active response body is never parsed, so its content is irrelevant.
+    const response = new Response(url === REFRESH_ENDPOINT ? "not parsed" : JSON.stringify(PAYLOAD), { status: 200 });
+    const stream = response.body ? Readable.fromWeb(response.body as import("node:stream/web").ReadableStream) : Readable.from([]);
+    Object.assign(stream, { statusCode: response.status, headers: Object.fromEntries(response.headers.entries()) });
+    queueMicrotask(() => callback(stream));
+    return request;
+  }) as typeof http.get;
 });
 
-afterEach(() => {
+afterEach(async () => {
   fetchRestore();
   env.restore();
+  await rm(home, { recursive: true, force: true });
 });
 
 /** Runs a Standard Schema validator from the RPC definition. */

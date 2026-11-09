@@ -4,7 +4,7 @@ A local OpenCode V2 plugin for the OpenCodex passive quota pool. It provides a q
 
 ## Scope
 
-- Two fixed endpoints: `GET http://127.0.0.1:10100/api/quota-pool` for passive reads, and `GET http://127.0.0.1:10100/api/provider-quotas?refresh=1` for the active rebuild.
+- Two management routes: `GET /api/quota-pool` for passive reads, and `GET /api/provider-quotas?refresh=1` for the active rebuild.
 - One supported wire schema: `ocx.quota-pool/1`, introduced by [OpenCodex #7476](https://github.com/lidge-jun/opencodex/pull/7476).
 - The passive read uses the cached quota pool. It never probes providers or refreshes upstream quota itself.
 - The sidebar shows the last passive reading immediately, repeats the passive read every 60 seconds, and asks for one active refresh on startup, sidebar mount, and after a completed session step. An active refresh asks OpenCodex to rebuild provider reports for every configured provider, then rereads the passive pool. The backend spaces automatic attempts by a five-minute cooldown shared across the process, including failed attempts, and runs one at a time; the plugin also never overlaps active calls, and a poll never triggers one. `/quota` opens a scrollable dialog and sends an explicit refresh that bypasses that cooldown; it still joins any active request already in flight. Only that command bypasses the cooldown: startup, mount, session, and poll requests stay automatic and throttled. Results follow request start, with an active success taking priority over a passive read that started before or during it; a later passive read can replace it, a failure never hides valid older data, and only a newer success clears an error.
@@ -21,7 +21,7 @@ This replaces the previous adaptation of `@slkiser/opencode-quota`. Its report f
 ## Requirements
 
 - OpenCode 2.0.32, matching the pinned `@opencode/plugin` dependency.
-- OpenCodex with the passive quota-pool endpoint on local port 10100.
+- OpenCodex with the passive quota-pool endpoint on a locally assigned address.
 - Node.js matching `package.json`'s `engines` field.
 
 ## Authentication and safety
@@ -32,7 +32,9 @@ The server resolves the management admin token in this order:
 2. The file named by `OPENCODEX_ADMIN_TOKEN_FILE`.
 3. `$OPENCODEX_HOME/admin-api-token`, defaulting to `~/.opencodex/admin-api-token`.
 
-The admin token is not a provider key or data-plane API key. It is sent only as a Bearer header to the two fixed loopback endpoints. It is never included in the quota snapshot or UI. Redirects are rejected, each passive HTTP request times out after 10 seconds, an active refresh is bounded at 20 seconds, and responses are capped at 1 MB. The active path only asks OpenCodex to rebuild its provider reports across every configured provider; OpenCodex performs all provider network activity. A failed automatic attempt holds the same five-minute cooldown, so failures are not retried early, and an active failure returns a safe error without replacing the last reading. An explicit `/quota` refresh bypasses the cooldown and restarts it, so a later failure or success is again throttled for five minutes.
+The admin token is not a provider key or data-plane API key. On POSIX, the plugin reads private, user-owned `$OPENCODEX_HOME/runtime-port.json` (default `~/.opencodex/runtime-port.json`). When it contains an attestation secret, the plugin requires a locally assigned numeric address and a fresh `/healthz` HMAC proof bound to the recorded PID and port before sending the bearer. Invalid metadata or failed proof fails closed. Missing metadata or a valid legacy record without an attestation secret uses `127.0.0.1:10100`. Windows does not support discovery and always uses that legacy loopback address. A malicious local relay or listener replacement between proof and request remains possible; attestation is not an absolute mitigation.
+
+The token is never included in the quota snapshot or UI. Direct HTTP bypasses environment proxies and rejects redirects. Each request has a 10-second deadline and responses are capped at 1 MB; discovery adds a health request before each management request. The active path only asks OpenCodex to rebuild its provider reports across every configured provider; OpenCodex performs all provider network activity. A failed automatic attempt holds the same five-minute cooldown, so failures are not retried early, and an active failure returns a safe error without replacing the last reading. An explicit `/quota` refresh bypasses the cooldown and restarts it, so a later failure or success is again throttled for five minutes.
 
 Missing credentials, HTTP errors, unsupported schemas, and malformed data produce an unavailable state. Raw response bodies and network error details are not displayed.
 
